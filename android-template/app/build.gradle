@@ -1,0 +1,41 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.webapp2apk.generated.knss'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.webapp2apk.generated.knss"
+        minSdk 21
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    packaging {
+        resources {
+            excludes += ['META-INF/NOTICE', 'META-INF/LICENSE', 'META-INF/depends.txt']
+            pickFirsts += ['**/*.kotlin_module', '**/*.version']
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.webkit:webkit:1.10.0'
+    
+    implementation platform('org.jetbrains.kotlin:kotlin-bom:1.9.22')
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib'
+}
