@@ -68,4 +68,4 @@ public class App extends Application {
         }
         messaging.subscribeToTopic("broadcast_all");
     }
-}}
+}
