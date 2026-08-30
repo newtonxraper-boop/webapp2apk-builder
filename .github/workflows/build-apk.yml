@@ -19,6 +19,27 @@ on:
         description: 'Internal request/build ID (optional)'
         required: false
         default: ''
+      icon_url:
+        description: 'Icon URL'
+        required: false
+      primary_color:
+        description: 'Primary Color'
+        required: false
+      accent_color:
+        description: 'Accent Color'
+        required: false
+      splash_enabled:
+        description: 'Splash Enabled'
+        required: false
+      push_enabled:
+        description: 'Push Enabled'
+        required: false
+      filecamera_enabled:
+        description: 'File Camera Enabled'
+        required: false
+      nav_items_b64:
+        description: 'Nav Items Base64'
+        required: false
 
 jobs:
   build:
@@ -59,10 +80,6 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      # Pin an exact Gradle version instead of relying on whatever "gradle" happens
-      # to resolve to on the runner. android-template/gradlew is currently a broken
-      # stub (missing gradle-wrapper.jar, unset $APP_HOME), so we can't use it yet -
-      # this action gives us the same reproducibility without needing that jar.
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
