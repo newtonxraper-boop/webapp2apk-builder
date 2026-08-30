@@ -3,13 +3,6 @@ plugins {
 }
 
 android {
-    // IMPORTANT: namespace must stay fixed at "com.webapp2apk.generated" because
-    // App.java / MainActivity.java / SplashActivity.java / MyFirebaseMessagingService.java
-    // are hardcoded to that package and reference R.* without an explicit import.
-    // If namespace were set to the dynamic {{PACKAGE_NAME}}, R would be generated in a
-    // different package and the build would fail with "cannot find symbol R".
-    // applicationId is what actually needs to vary per generated app (Play Store identity),
-    // so only that is templated.
     namespace "com.webapp2apk.generated"
     compileSdk 34
 
@@ -72,13 +65,23 @@ dependencies {
 }
 
 configurations.all {
-    resolutionStrategy.eachDependency { DependencyResolveDetails details ->
-        if (details.requested.group == 'org.jetbrains.kotlin') {
-            if (details.requested.name == 'kotlin-stdlib-jdk7' || details.requested.name == 'kotlin-stdlib-jdk8') {
+    resolutionStrategy {
+        eachDependency { details ->
+            if (details.requested.group == 'org.jetbrains.kotlin' && 
+               (details.requested.name == 'kotlin-stdlib-jdk7' || details.requested.name == 'kotlin-stdlib-jdk8')) {
                 details.useVersion '1.8.22'
             }
         }
     }
-    exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
-    exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+}
+
+// Completely drop legacy jdk7/jdk8 modules via components configuration
+dependencies.components {
+    all { ComponentMetadataDetails details ->
+        if (details.id.group == 'org.jetbrains.kotlin') {
+            if (details.id.name == 'kotlin-stdlib-jdk7' || details.id.name == 'kotlin-stdlib-jdk8') {
+                details.status = 'milestone' // effectively demotes and ignores older versions
+            }
+        }
+    }
 }
