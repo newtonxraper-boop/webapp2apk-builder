@@ -70,3 +70,13 @@ dependencies {
     implementation 'androidx.activity:activity:1.8.2'
     implementation 'com.google.firebase:firebase-messaging:23.4.1'
 }
+
+configurations.all {
+    // firebase-messaging pulls kotlin-stdlib 1.8.22, which already contains
+    // everything kotlin-stdlib-jdk7/jdk8 used to provide separately. Some other
+    // transitive dependency still pulls the old jdk7/jdk8 1.7.10 artifacts,
+    // causing duplicate-class dexing failures. Drop the legacy ones.
+    exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+    exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+}
+}
