@@ -1,0 +1,72 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    // IMPORTANT: namespace must stay fixed at "com.webapp2apk.generated" because
+    // App.java / MainActivity.java / SplashActivity.java / MyFirebaseMessagingService.java
+    // are hardcoded to that package and reference R.* without an explicit import.
+    // If namespace were set to the dynamic {{PACKAGE_NAME}}, R would be generated in a
+    // different package and the build would fail with "cannot find symbol R".
+    // applicationId is what actually needs to vary per generated app (Play Store identity),
+    // so only that is templated.
+    namespace "com.webapp2apk.generated"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "{{PACKAGE_NAME}}"
+        minSdk 23
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+        multiDexEnabled true
+    }
+
+    signingConfigs {
+        release {
+            storeFile file(System.getenv("KEYSTORE_PATH") ?: "debug.keystore")
+            storePassword System.getenv("KEYSTORE_PASSWORD") ?: "android"
+            keyAlias System.getenv("KEY_ALIAS") ?: "androiddebugkey"
+            keyPassword System.getenv("KEY_PASSWORD") ?: "android"
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+        }
+    }
+
+    buildFeatures {
+        viewBinding false
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    packagingOptions {
+        resources {
+            excludes += [
+                'META-INF/DEPENDENCIES',
+                'META-INF/LICENSE',
+                'META-INF/LICENSE.txt',
+                'META-INF/license.txt',
+                'META-INF/NOTICE',
+                'META-INF/NOTICE.txt',
+                'META-INF/notice.txt',
+                'META-INF/ASL2.0',
+                'META-INF/*.kotlin_module'
+            ]
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+    implementation 'androidx.activity:activity:1.8.2'
+    implementation 'com.google.firebase:firebase-messaging:23.4.1'
+}

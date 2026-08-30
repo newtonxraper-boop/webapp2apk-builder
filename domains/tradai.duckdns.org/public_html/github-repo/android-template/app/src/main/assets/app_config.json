@@ -1,0 +1,8 @@
+{
+  "app_name": "{{APP_NAME}}",
+  "app_url": "{{APP_URL}}",
+  "request_id": "{{REQUEST_ID}}",
+  "push_enabled": false,
+  "filecamera_enabled": true,
+  "splash_enabled": true
+}
