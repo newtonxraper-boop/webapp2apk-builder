@@ -62,26 +62,21 @@ dependencies {
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
     implementation 'androidx.activity:activity:1.8.2'
     implementation 'com.google.firebase:firebase-messaging:23.4.1'
+
+    // Force strict constraints on all kotlin standard libraries to match 1.8.22
+    constraints {
+        implementation('org.jetbrains.kotlin:kotlin-stdlib:1.8.22')
+        implementation('org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22')
+        implementation('org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22')
+        implementation('org.jetbrains.kotlin:kotlin-stdlib-common:1.8.22')
+    }
 }
 
 configurations.all {
     resolutionStrategy {
-        eachDependency { details ->
-            if (details.requested.group == 'org.jetbrains.kotlin' && 
-               (details.requested.name == 'kotlin-stdlib-jdk7' || details.requested.name == 'kotlin-stdlib-jdk8')) {
-                details.useVersion '1.8.22'
-            }
-        }
-    }
-}
-
-// Completely drop legacy jdk7/jdk8 modules via components configuration
-dependencies.components {
-    all { ComponentMetadataDetails details ->
-        if (details.id.group == 'org.jetbrains.kotlin') {
-            if (details.id.name == 'kotlin-stdlib-jdk7' || details.id.name == 'kotlin-stdlib-jdk8') {
-                details.status = 'milestone' // effectively demotes and ignores older versions
-            }
-        }
+        force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-common:1.8.22'
     }
 }
