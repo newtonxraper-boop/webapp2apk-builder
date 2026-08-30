@@ -79,6 +79,42 @@ def main():
             except UnicodeDecodeError:
                 continue
 
+            # Fix legacy App.java Firebase initialization if present in the template source
+            if "App.java" in filename:
+                content = content.replace("FirebaseMessaging.getInstance(app)", "FirebaseMessaging.getInstance()")
+
+            if "{{" not in content and "FirebaseMessaging.getInstance(" not in original_content_check_marker(content): # safe check
+                pass
+
+            original = content
+            for placeholder, value in replacements.items():
+                content = content.replace(placeholder, value)
+
+            if content != original:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                updated_files.append(path)
+
+    print("Resources generated successfully under android-template/")
+    print(f"App name: {app_name}")
+    print(f"App URL: {app_url}")
+    print(f"Package name (applicationId): {package_name}")
+    print(f"Files updated: {len(updated_files)}")
+    for f in updated_files:
+        print(f"  - {f}")
+
+
+if __name__ == "__main__":
+    main()
+            if os.path.splitext(filename)[1] not in TEXT_EXTENSIONS:
+                continue
+            path = os.path.join(dirpath, filename)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except UnicodeDecodeError:
+                continue
+
             if "{{" not in content:
                 continue
 
