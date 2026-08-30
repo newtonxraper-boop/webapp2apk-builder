@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="primary_color">#3DDC84</color>
-    <color name="primary_dark_color">#2BB673</color>
-    <color name="accent_color">#3DDC84</color>
+    <color name="primary_color">{{PRIMARY_COLOR}}</color>
+    <color name="primary_dark_color">{{PRIMARY_DARK_COLOR}}</color>
+    <color name="accent_color">{{ACCENT_COLOR}}</color>
     <color name="tab_inactive">#9AA0A6</color>
     <color name="tab_bg">#171A21</color>
 </resources>
+

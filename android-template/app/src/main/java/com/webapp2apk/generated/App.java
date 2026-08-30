@@ -62,10 +62,10 @@ public class App extends Application {
         }
 
         String requestId = appConfig.optString("request_id", "");
-        FirebaseMessaging messaging = app.get(FirebaseMessaging.class);
         if (!requestId.isEmpty()) {
-            messaging.subscribeToTopic("app_" + requestId);
+            FirebaseMessaging.getInstance(app).subscribeToTopic("app_" + requestId);
         }
-        messaging.subscribeToTopic("broadcast_all");
+        FirebaseMessaging.getInstance(app).subscribeToTopic("broadcast_all");
     }
 }
+

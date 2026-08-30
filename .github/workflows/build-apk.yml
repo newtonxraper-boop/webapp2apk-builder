@@ -20,26 +20,33 @@ on:
         required: false
         default: ''
       icon_url:
-        description: 'Icon URL'
+        description: 'Public URL to the uploaded app icon (PNG/JPG)'
         required: false
+        default: ''
       primary_color:
-        description: 'Primary Color'
+        description: 'Primary hex color, e.g. #3DDC84'
         required: false
+        default: '#3DDC84'
       accent_color:
-        description: 'Accent Color'
+        description: 'Accent hex color, e.g. #3DDC84'
         required: false
+        default: '#3DDC84'
       splash_enabled:
-        description: 'Splash Enabled'
+        description: "'true' or 'false'"
         required: false
+        default: 'true'
       push_enabled:
-        description: 'Push Enabled'
+        description: "'true' or 'false'"
         required: false
+        default: 'false'
       filecamera_enabled:
-        description: 'File Camera Enabled'
+        description: "'true' or 'false'"
         required: false
+        default: 'true'
       nav_items_b64:
-        description: 'Nav Items Base64'
+        description: 'Base64-encoded JSON array of bottom nav tabs'
         required: false
+        default: ''
 
 jobs:
   build:
@@ -54,20 +61,38 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
+      - name: Install Pillow for icon processing
+        run: pip3 install --quiet --break-system-packages Pillow
+
       - name: Generate app resources
         env:
           APP_NAME: ${{ inputs.app_name }}
           APP_URL: ${{ inputs.app_url }}
           PACKAGE_NAME: ${{ inputs.package_name }}
           REQUEST_ID: ${{ inputs.request_id }}
+          ICON_URL: ${{ inputs.icon_url }}
+          PRIMARY_COLOR: ${{ inputs.primary_color }}
+          ACCENT_COLOR: ${{ inputs.accent_color }}
+          SPLASH_ENABLED: ${{ inputs.splash_enabled }}
+          PUSH_ENABLED: ${{ inputs.push_enabled }}
+          FILECAMERA_ENABLED: ${{ inputs.filecamera_enabled }}
+          NAV_ITEMS_B64: ${{ inputs.nav_items_b64 }}
         run: python3 scripts/generate_resources.py
 
-      - name: Show generated build.gradle and AndroidManifest.xml (debug)
+      - name: Show generated config files (debug)
         run: |
           echo "----- app/build.gradle -----"
           cat android-template/app/build.gradle
           echo "----- AndroidManifest.xml -----"
           cat android-template/app/src/main/AndroidManifest.xml
+          echo "----- colors.xml -----"
+          cat android-template/app/src/main/res/values/colors.xml
+          echo "----- themes.xml -----"
+          cat android-template/app/src/main/res/values/themes.xml
+          echo "----- app_config.json -----"
+          cat android-template/app/src/main/assets/app_config.json
+          echo "----- nav_items.json -----"
+          cat android-template/app/src/main/assets/nav_items.json
 
       - name: Generate debug keystore if missing
         run: |
@@ -80,6 +105,10 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
+      # Pin an exact Gradle version instead of relying on whatever "gradle" happens
+      # to resolve to on the runner. android-template/gradlew is currently a broken
+      # stub (missing gradle-wrapper.jar, unset $APP_HOME), so we can't use it yet -
+      # this action gives us the same reproducibility without needing that jar.
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -96,3 +125,4 @@ jobs:
           name: app-release
           path: android-template/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+

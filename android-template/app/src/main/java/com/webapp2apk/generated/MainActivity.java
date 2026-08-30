@@ -9,11 +9,13 @@ import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
+import android.webkit.CookieManager;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -30,10 +32,20 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -50,6 +62,16 @@ public class MainActivity extends AppCompatActivity {
     private ActivityResultLauncher<String[]> cameraMicPermissionLauncher;
     private PermissionRequest pendingWebPermissionRequest;
 
+    // --- Offline page cache -------------------------------------------------
+    // Every full-page navigation (not images/CSS/JS/API calls) gets saved to
+    // app-private storage. Next time that exact page is opened, we always try
+    // the network first (so you get the freshest version whenever there IS a
+    // connection), and only fall back to the last saved copy when the network
+    // request truly fails. This is what makes pages "stay on the phone" until
+    // there's an actual update.
+    private static final long MAX_CACHE_BYTES = 25L * 1024 * 1024; // 25 MB cap
+    private File offlineCacheDir;
+
     @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -64,6 +86,9 @@ public class MainActivity extends AppCompatActivity {
         JSONObject config = App.appConfig;
         homeUrl = config.optString("app_url", getString(R.string.app_url));
         filecameraEnabled = config.optBoolean("filecamera_enabled", true);
+
+        offlineCacheDir = new File(getFilesDir(), "webcache");
+        if (!offlineCacheDir.exists()) offlineCacheDir.mkdirs();
 
         setupActivityResultLaunchers();
         setupWebView();
@@ -115,11 +140,40 @@ public class MainActivity extends AppCompatActivity {
         settings.setAllowFileAccess(true);
 
         webView.setWebViewClient(new WebViewClient() {
+            // Secondary safety net: if a page still fails after our own
+            // shouldInterceptRequest cache attempt (e.g. this was a non-GET or
+            // cross-origin request WebView handled itself), try once more with
+            // WebView's own disk cache before giving up entirely.
+            private boolean cacheRetryInProgress = false;
+
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                if (!request.isForMainFrame()) return null;
+                return maybeServeFromOfflineCache(request);
+            }
+
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 super.onReceivedError(view, request, error);
-                if (request.isForMainFrame()) {
+                if (!request.isForMainFrame()) return;
+
+                if (!cacheRetryInProgress) {
+                    cacheRetryInProgress = true;
+                    view.getSettings().setCacheMode(WebSettings.LOAD_CACHE_ONLY);
+                    view.loadUrl(request.getUrl().toString());
+                } else {
+                    cacheRetryInProgress = false;
+                    view.getSettings().setCacheMode(WebSettings.LOAD_DEFAULT);
                     view.loadUrl("file:///android_asset/offline.html");
+                }
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                if (cacheRetryInProgress) {
+                    cacheRetryInProgress = false;
+                    view.getSettings().setCacheMode(WebSettings.LOAD_DEFAULT);
                 }
             }
         });
@@ -166,6 +220,137 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         });
+    }
+
+    /**
+     * Tries the network first (always, so content is fresh whenever there's a
+     * connection) and saves a successful response to disk. If the network
+     * request fails, falls back to the last saved copy of that exact page, if
+     * one exists. Returns null if nothing can be served (lets WebView's normal
+     * error handling / offline.html fallback take over).
+     */
+    private WebResourceResponse maybeServeFromOfflineCache(WebResourceRequest request) {
+        if (!"GET".equalsIgnoreCase(request.getMethod())) return null;
+
+        Uri uri = request.getUrl();
+        String scheme = uri.getScheme();
+        if (scheme == null || !(scheme.equals("http") || scheme.equals("https"))) return null;
+
+        Uri homeUri = Uri.parse(homeUrl);
+        if (homeUri.getHost() == null || !homeUri.getHost().equalsIgnoreCase(uri.getHost())) {
+            // Only cache pages on the app's own domain.
+            return null;
+        }
+
+        String cacheKey = sha256(uri.toString());
+        File bodyFile = new File(offlineCacheDir, cacheKey + ".body");
+        File metaFile = new File(offlineCacheDir, cacheKey + ".meta");
+
+        try {
+            HttpURLConnection conn = (HttpURLConnection) new URL(uri.toString()).openConnection();
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(8000);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android; WebApp2Apk offline cache)");
+
+            CookieManager cookieManager = CookieManager.getInstance();
+            String cookie = cookieManager.getCookie(uri.toString());
+            if (cookie != null) conn.setRequestProperty("Cookie", cookie);
+
+            int status = conn.getResponseCode();
+            if (status >= 200 && status < 300) {
+                Map<String, List<String>> headers = conn.getHeaderFields();
+                List<String> setCookies = headers.get("Set-Cookie");
+                if (setCookies != null) {
+                    for (String sc : setCookies) cookieManager.setCookie(uri.toString(), sc);
+                    cookieManager.flush();
+                }
+
+                String contentType = conn.getContentType();
+                String mimeType = "text/html";
+                String encoding = "UTF-8";
+                if (contentType != null) {
+                    String[] parts = contentType.split(";");
+                    mimeType = parts[0].trim();
+                    for (String p : parts) {
+                        p = p.trim();
+                        if (p.toLowerCase().startsWith("charset=")) {
+                            encoding = p.substring(8).trim();
+                        }
+                    }
+                }
+
+                byte[] data = readAllBytes(conn.getInputStream());
+                conn.disconnect();
+
+                writeFileQuietly(bodyFile, data);
+                writeFileQuietly(metaFile, (mimeType + "|" + encoding).getBytes("UTF-8"));
+                enforceCacheSizeLimit();
+
+                return new WebResourceResponse(mimeType, encoding, new ByteArrayInputStream(data));
+            } else {
+                conn.disconnect();
+            }
+        } catch (Exception networkFailed) {
+            // fall through to the cached copy below
+        }
+
+        if (bodyFile.exists() && metaFile.exists()) {
+            try {
+                String meta = new String(readAllBytes(new FileInputStream(metaFile)), "UTF-8");
+                String[] parts = meta.split("\\|", 2);
+                String mimeType = parts.length > 0 ? parts[0] : "text/html";
+                String encoding = parts.length > 1 ? parts[1] : "UTF-8";
+                return new WebResourceResponse(mimeType, encoding, new FileInputStream(bodyFile));
+            } catch (Exception ignored) {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private static byte[] readAllBytes(InputStream in) throws java.io.IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+        int n;
+        while ((n = in.read(chunk)) != -1) buffer.write(chunk, 0, n);
+        in.close();
+        return buffer.toByteArray();
+    }
+
+    private static void writeFileQuietly(File file, byte[] data) {
+        try (FileOutputStream fos = new FileOutputStream(file)) {
+            fos.write(data);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static String sha256(String input) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(input.getBytes("UTF-8"));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hash) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Exception e) {
+            return String.valueOf(input.hashCode());
+        }
+    }
+
+    private void enforceCacheSizeLimit() {
+        File[] files = offlineCacheDir.listFiles();
+        if (files == null) return;
+        long total = 0;
+        for (File f : files) total += f.length();
+        if (total <= MAX_CACHE_BYTES) return;
+
+        Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+        for (File f : files) {
+            if (total <= MAX_CACHE_BYTES) break;
+            total -= f.length();
+            f.delete();
+        }
     }
 
     private void setupSwipeRefresh() {
@@ -223,3 +408,4 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 }
+

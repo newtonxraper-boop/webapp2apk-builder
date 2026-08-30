@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.WebApp2Apk" parent="Theme.AppCompat.Light.NoActionBar">
-        <item name="colorPrimary">#3DDC84</item>
-        <item name="colorPrimaryDark">#2BB673</item>
-        <item name="colorAccent">#3DDC84</item>
+        <item name="colorPrimary">{{PRIMARY_COLOR}}</item>
+        <item name="colorPrimaryDark">{{PRIMARY_DARK_COLOR}}</item>
+        <item name="colorAccent">{{ACCENT_COLOR}}</item>
     </style>
 </resources>
+
