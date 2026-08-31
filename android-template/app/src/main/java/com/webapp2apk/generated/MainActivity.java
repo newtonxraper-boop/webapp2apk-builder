@@ -4,9 +4,12 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.webkit.CookieManager;
@@ -62,6 +65,12 @@ public class MainActivity extends AppCompatActivity {
     private ActivityResultLauncher<String[]> cameraMicPermissionLauncher;
     private PermissionRequest pendingWebPermissionRequest;
 
+    // Bottom nav tab bookkeeping - lets us re-tint icons/labels when the
+    // active tab changes, without rebuilding the whole bar.
+    private final List<LinearLayout> tabContainers = new ArrayList<>();
+    private final List<String> tabUrls = new ArrayList<>();
+    private String currentActiveUrl;
+
     // --- Offline page cache -------------------------------------------------
     // Every full-page navigation (not images/CSS/JS/API calls) gets saved to
     // app-private storage. Next time that exact page is opened, we always try
@@ -86,6 +95,7 @@ public class MainActivity extends AppCompatActivity {
         JSONObject config = App.appConfig;
         homeUrl = config.optString("app_url", getString(R.string.app_url));
         filecameraEnabled = config.optBoolean("filecamera_enabled", true);
+        currentActiveUrl = homeUrl;
 
         offlineCacheDir = new File(getFilesDir(), "webcache");
         if (!offlineCacheDir.exists()) offlineCacheDir.mkdirs();
@@ -153,6 +163,12 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
+            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                super.onPageStarted(view, url, favicon);
+                progressBar.setVisibility(View.VISIBLE);
+            }
+
+            @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 super.onReceivedError(view, request, error);
                 if (!request.isForMainFrame()) return;
@@ -171,6 +187,8 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
+                progressBar.setVisibility(View.GONE);
+                swipeRefresh.setRefreshing(false);
                 if (cacheRetryInProgress) {
                     cacheRetryInProgress = false;
                     view.getSettings().setCacheMode(WebSettings.LOAD_DEFAULT);
@@ -181,8 +199,10 @@ public class MainActivity extends AppCompatActivity {
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onProgressChanged(WebView view, int newProgress) {
-                progressBar.setProgress(newProgress);
-                progressBar.setVisibility(newProgress >= 100 ? View.GONE : View.VISIBLE);
+                // Loading feedback is shown as a centered spinner via
+                // WebViewClient.onPageStarted/onPageFinished instead of a
+                // percentage bar, so there's nothing to update here besides
+                // making sure the pull-to-refresh spinner stops.
                 if (newProgress >= 100) swipeRefresh.setRefreshing(false);
             }
 
@@ -357,6 +377,19 @@ public class MainActivity extends AppCompatActivity {
         swipeRefresh.setOnRefreshListener(() -> webView.loadUrl(homeUrl));
     }
 
+    private int dpToPx(int dp) {
+        float density = getResources().getDisplayMetrics().density;
+        return Math.round(dp * density);
+    }
+
+    private void applyRippleForeground(View view) {
+        TypedValue outValue = new TypedValue();
+        getTheme().resolveAttribute(android.R.attr.selectableItemBackground, outValue, true);
+        if (outValue.resourceId != 0) {
+            view.setForeground(ContextCompat.getDrawable(this, outValue.resourceId));
+        }
+    }
+
     private void setupBottomTabs() {
         JSONArray navItems = loadNavItems();
         if (navItems == null || navItems.length() == 0) {
@@ -366,24 +399,91 @@ public class MainActivity extends AppCompatActivity {
 
         bottomTabBar.setVisibility(View.VISIBLE);
         bottomTabBar.removeAllViews();
+        tabContainers.clear();
+        tabUrls.clear();
 
         for (int i = 0; i < navItems.length(); i++) {
             JSONObject item = navItems.optJSONObject(i);
             if (item == null) continue;
             String label = item.optString("label", "Tab");
-            String icon = item.optString("icon", "\u25CF");
+            String icon = item.optString("icon", "").trim();
             String url = item.optString("url", homeUrl);
 
-            TextView tabView = new TextView(this);
-            tabView.setText(icon + "\n" + label);
-            tabView.setGravity(Gravity.CENTER);
-            tabView.setTextColor(ContextCompat.getColor(this, R.color.tab_inactive));
-            tabView.setTextSize(11);
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+            LinearLayout tabContainer = new LinearLayout(this);
+            tabContainer.setOrientation(LinearLayout.VERTICAL);
+            tabContainer.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams containerParams = new LinearLayout.LayoutParams(
                     0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
-            tabView.setLayoutParams(params);
-            tabView.setOnClickListener(v -> webView.loadUrl(url));
-            bottomTabBar.addView(tabView);
+            tabContainer.setLayoutParams(containerParams);
+            tabContainer.setClickable(true);
+            tabContainer.setFocusable(true);
+            applyRippleForeground(tabContainer);
+
+            TextView iconView = new TextView(this);
+            iconView.setGravity(Gravity.CENTER);
+            boolean hasRealIcon = !icon.isEmpty() && !icon.equals("\u25CF");
+
+            if (hasRealIcon) {
+                iconView.setText(icon);
+                iconView.setTextSize(20);
+                iconView.setLayoutParams(new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            } else {
+                // No icon was chosen for this tab - instead of a plain bullet
+                // dot, show the tab's first letter inside a small tinted
+                // circular badge, which reads as an intentional design rather
+                // than a missing icon.
+                String letter = label.isEmpty() ? "?" : label.substring(0, 1).toUpperCase();
+                iconView.setText(letter);
+                iconView.setTextSize(13);
+                iconView.setTypeface(Typeface.DEFAULT_BOLD);
+                LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(dpToPx(22), dpToPx(22));
+                iconView.setLayoutParams(badgeParams);
+
+                GradientDrawable badgeBg = new GradientDrawable();
+                badgeBg.setShape(GradientDrawable.OVAL);
+                badgeBg.setColor(ContextCompat.getColor(this, R.color.accent_color));
+                badgeBg.setAlpha(50);
+                iconView.setBackground(badgeBg);
+            }
+
+            TextView labelView = new TextView(this);
+            labelView.setText(label);
+            labelView.setGravity(Gravity.CENTER);
+            labelView.setTextSize(10.5f);
+            labelView.setPadding(0, dpToPx(3), 0, 0);
+            labelView.setMaxLines(1);
+
+            tabContainer.addView(iconView);
+            tabContainer.addView(labelView);
+            tabContainer.setOnClickListener(v -> {
+                currentActiveUrl = url;
+                webView.loadUrl(url);
+                refreshTabHighlighting();
+            });
+
+            bottomTabBar.addView(tabContainer);
+            tabContainers.add(tabContainer);
+            tabUrls.add(url);
+        }
+
+        refreshTabHighlighting();
+    }
+
+    private void refreshTabHighlighting() {
+        int activeColor = ContextCompat.getColor(this, R.color.accent_color);
+        int inactiveColor = ContextCompat.getColor(this, R.color.tab_inactive);
+
+        for (int i = 0; i < tabContainers.size(); i++) {
+            LinearLayout container = tabContainers.get(i);
+            boolean active = tabUrls.get(i).equals(currentActiveUrl);
+            int color = active ? activeColor : inactiveColor;
+            for (int j = 0; j < container.getChildCount(); j++) {
+                View child = container.getChildAt(j);
+                if (child instanceof TextView) {
+                    ((TextView) child).setTextColor(color);
+                }
+            }
         }
     }
 
@@ -408,4 +508,3 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 }
-

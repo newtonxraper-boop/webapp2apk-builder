@@ -5,5 +5,5 @@
     <color name="accent_color">{{ACCENT_COLOR}}</color>
     <color name="tab_inactive">#9AA0A6</color>
     <color name="tab_bg">#171A21</color>
+    <color name="ic_launcher_background">{{PRIMARY_COLOR}}</color>
 </resources>
-

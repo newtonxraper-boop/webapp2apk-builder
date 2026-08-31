@@ -30,6 +30,21 @@ MIPMAP_SIZES = {
     "mipmap-xxxhdpi": 192,
 }
 
+# Adaptive icon foreground canvases are conventionally a 108dp square per
+# density, of which only the inner ~66% ("safe zone") is guaranteed visible
+# once a launcher masks it into a circle/squircle/rounded-square - anything
+# outside that gets clipped. That's what was making the icon look like a
+# plain "big box": there was no adaptive-icon foreground/background at all,
+# so modern launchers fell back to showing the flat square legacy icon
+# un-masked instead of shaping it like every other app.
+ADAPTIVE_FOREGROUND_SIZES = {
+    "mipmap-mdpi": 108,
+    "mipmap-hdpi": 162,
+    "mipmap-xhdpi": 216,
+    "mipmap-xxhdpi": 324,
+    "mipmap-xxxhdpi": 432,
+}
+
 
 def sanitize_segment(text: str) -> str:
     """Make a single package-name segment a valid Java identifier."""
@@ -144,14 +159,25 @@ def process_icon(icon_url: str) -> bool:
         resized = src.resize((size, size), Image.LANCZOS)
         resized.save(os.path.join(dest_dir, "ic_launcher.png"))
 
-        # Circular-masked variant for ic_launcher_round
+        # Circular-masked variant for ic_launcher_round (legacy/pre-API26 devices)
         mask = Image.new("L", (size, size), 0)
         ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
         round_icon = Image.new("RGBA", (size, size))
         round_icon.paste(resized, (0, 0), mask=mask)
         round_icon.save(os.path.join(dest_dir, "ic_launcher_round.png"))
 
-    print("Custom app icon applied to all mipmap densities.")
+    for folder, canvas_size in ADAPTIVE_FOREGROUND_SIZES.items():
+        dest_dir = os.path.join(TEMPLATE_ROOT, "app", "src", "main", "res", folder)
+        os.makedirs(dest_dir, exist_ok=True)
+
+        icon_size = int(canvas_size * 0.66)
+        fg_resized = src.resize((icon_size, icon_size), Image.LANCZOS)
+        canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+        offset = (canvas_size - icon_size) // 2
+        canvas.paste(fg_resized, (offset, offset), fg_resized)
+        canvas.save(os.path.join(dest_dir, "ic_launcher_foreground.png"))
+
+    print("Custom app icon applied (legacy + adaptive foreground, all densities).")
     return True
 
 
@@ -241,4 +267,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
