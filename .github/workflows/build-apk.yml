@@ -105,10 +105,6 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      # Pin an exact Gradle version instead of relying on whatever "gradle" happens
-      # to resolve to on the runner. android-template/gradlew is currently a broken
-      # stub (missing gradle-wrapper.jar, unset $APP_HOME), so we can't use it yet -
-      # this action gives us the same reproducibility without needing that jar.
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -126,22 +122,18 @@ jobs:
           path: android-template/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
-      # Delivers the APK straight to your website (receive.php) instead of
-      # leaving it sitting only in GitHub's own artifact storage - this is
-      # what makes it show up on your site the moment the build finishes,
-      # rather than the site having to guess/poll GitHub Actions for status.
-      # Requires two repo secrets set once under Settings > Secrets and
-      # variables > Actions: RECEIVE_URL (e.g. https://yoursite.com/receive.php)
-      # and CALLBACK_SECRET (must match the callback_secret in your site's settings).
       - name: Deliver APK to website
-        if: ${{ secrets.RECEIVE_URL != '' }}
+        env:
+          RECEIVE_URL: ${{ secrets.RECEIVE_URL }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+        if: env.RECEIVE_URL != ''
         run: |
           APK_PATH=$(find android-template/app/build/outputs/apk/release -name '*.apk' | head -n1)
           if [ -z "$APK_PATH" ]; then
             echo "No APK found to deliver"; exit 1
           fi
-          curl -sS -f -X POST "${{ secrets.RECEIVE_URL }}" \
-            -F "token=${{ secrets.CALLBACK_SECRET }}" \
+          curl -sS -f -X POST "$RECEIVE_URL" \
+            -F "token=$CALLBACK_SECRET" \
             -F "request_id=${{ inputs.request_id }}" \
             -F "apk=@${APK_PATH}"
           echo "Delivered APK to website"
