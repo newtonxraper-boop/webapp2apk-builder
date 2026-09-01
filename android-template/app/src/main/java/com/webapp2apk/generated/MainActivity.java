@@ -2,16 +2,29 @@ package com.webapp2apk.generated;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+import android.app.DownloadManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.Window;
+import android.webkit.URLUtil;
+import android.widget.Toast;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import android.webkit.CookieManager;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
@@ -56,6 +69,8 @@ public class MainActivity extends AppCompatActivity {
     private SwipeRefreshLayout swipeRefresh;
     private ProgressBar progressBar;
     private LinearLayout bottomTabBar;
+    private TextView offlineBanner;
+    private View shareButton;
 
     private String homeUrl;
     private boolean filecameraEnabled;
@@ -63,7 +78,16 @@ public class MainActivity extends AppCompatActivity {
     private ValueCallback<Uri[]> filePathCallback;
     private ActivityResultLauncher<Intent> fileChooserLauncher;
     private ActivityResultLauncher<String[]> cameraMicPermissionLauncher;
+    private ActivityResultLauncher<String> storagePermissionLauncher;
     private PermissionRequest pendingWebPermissionRequest;
+    private DownloadManager.Request pendingDownloadRequest;
+    private String pendingDownloadFileName;
+
+    // Exit confirmation - back press only exits if pressed twice within 2s.
+    private long backPressedAt = 0;
+
+    // Offline banner tracking.
+    private ConnectivityManager.NetworkCallback networkCallback;
 
     // Bottom nav tab bookkeeping - lets us re-tint icons/labels when the
     // active tab changes, without rebuilding the whole bar.
@@ -86,11 +110,14 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        applyImmersiveTheming();
 
         webView = findViewById(R.id.webview);
         swipeRefresh = findViewById(R.id.swipeRefresh);
         progressBar = findViewById(R.id.progressBar);
         bottomTabBar = findViewById(R.id.bottomTabBar);
+        offlineBanner = findViewById(R.id.offlineBanner);
+        shareButton = findViewById(R.id.shareButton);
 
         JSONObject config = App.appConfig;
         homeUrl = config.optString("app_url", getString(R.string.app_url));
@@ -102,10 +129,55 @@ public class MainActivity extends AppCompatActivity {
 
         setupActivityResultLaunchers();
         setupWebView();
+        setupDownloadListener();
+        setupShareButton();
+        setupConnectivityBanner();
         setupSwipeRefresh();
         setupBottomTabs();
 
         webView.loadUrl(homeUrl);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (networkCallback != null) {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                try {
+                    cm.unregisterNetworkCallback(networkCallback);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    /**
+     * Tints the phone's status bar and system navigation bar to match the
+     * app's own theme color instead of leaving them plain black/white. This
+     * is what makes the app boundary feel seamless with your site's own
+     * header/footer, the way every polished native app does, rather than
+     * looking like a plain browser window with mismatched OS chrome above
+     * and below it.
+     */
+    private void applyImmersiveTheming() {
+        int chromeColor = ContextCompat.getColor(this, R.color.primary_dark_color);
+        Window window = getWindow();
+        window.setStatusBarColor(chromeColor);
+        window.setNavigationBarColor(chromeColor);
+
+        boolean lightBackground = isColorLight(chromeColor);
+        WindowInsetsControllerCompat controller =
+                WindowCompat.getInsetsController(window, window.getDecorView());
+        controller.setAppearanceLightStatusBars(lightBackground);
+        controller.setAppearanceLightNavigationBars(lightBackground);
+    }
+
+    private static boolean isColorLight(int color) {
+        double luminance = (0.299 * Color.red(color)
+                + 0.587 * Color.green(color)
+                + 0.114 * Color.blue(color)) / 255.0;
+        return luminance > 0.6;
     }
 
     private void setupActivityResultLaunchers() {
@@ -134,6 +206,18 @@ public class MainActivity extends AppCompatActivity {
                         pendingWebPermissionRequest.deny();
                     }
                     pendingWebPermissionRequest = null;
+                });
+
+        storagePermissionLauncher = registerForActivityResult(
+                new ActivityResultContracts.RequestPermission(),
+                granted -> {
+                    if (granted && pendingDownloadRequest != null) {
+                        enqueueDownload(pendingDownloadRequest, pendingDownloadFileName);
+                    } else if (!granted) {
+                        Toast.makeText(this, "Download needs storage permission", Toast.LENGTH_SHORT).show();
+                    }
+                    pendingDownloadRequest = null;
+                    pendingDownloadFileName = null;
                 });
     }
 
@@ -377,6 +461,117 @@ public class MainActivity extends AppCompatActivity {
         swipeRefresh.setOnRefreshListener(() -> webView.loadUrl(homeUrl));
     }
 
+    /**
+     * WebView can't download files on its own (PDFs, receipts, certificates
+     * a site links to just silently fail without this) - route them through
+     * Android's own DownloadManager instead, which shows a real system
+     * notification and saves to the phone's Downloads folder.
+     */
+    private void setupDownloadListener() {
+        webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
+            try {
+                DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
+                String cookie = CookieManager.getInstance().getCookie(url);
+                if (cookie != null) request.addRequestHeader("Cookie", cookie);
+                request.addRequestHeader("User-Agent", userAgent);
+
+                String fileName = URLUtil.guessFileName(url, contentDisposition, mimeType);
+                request.setMimeType(mimeType);
+                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
+                request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                request.setTitle(fileName);
+
+                boolean needsPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+                        && ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                        != PackageManager.PERMISSION_GRANTED;
+
+                if (needsPermission) {
+                    pendingDownloadRequest = request;
+                    pendingDownloadFileName = fileName;
+                    storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE);
+                } else {
+                    enqueueDownload(request, fileName);
+                }
+            } catch (Exception e) {
+                Toast.makeText(this, "Could not start download", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    private void enqueueDownload(DownloadManager.Request request, String fileName) {
+        try {
+            DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+            if (dm != null) {
+                dm.enqueue(request);
+                Toast.makeText(this, "Downloading " + fileName, Toast.LENGTH_SHORT).show();
+            }
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not start download", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void setupShareButton() {
+        shareButton.setOnClickListener(v -> {
+            String url = webView.getUrl();
+            if (url == null || url.startsWith("file:///android_asset/")) url = homeUrl;
+            String title = webView.getTitle();
+
+            Intent shareIntent = new Intent(Intent.ACTION_SEND);
+            shareIntent.setType("text/plain");
+            if (title != null && !title.isEmpty()) {
+                shareIntent.putExtra(Intent.EXTRA_SUBJECT, title);
+            }
+            shareIntent.putExtra(Intent.EXTRA_TEXT, url);
+            startActivity(Intent.createChooser(shareIntent, "Share via"));
+        });
+    }
+
+    /**
+     * Shows a slim "No internet connection" strip whenever there's no active
+     * connection - separate from (and in addition to) the full-page offline
+     * cache, so there's always a clear, immediate signal even on pages that
+     * were never cached.
+     */
+    private void setupConnectivityBanner() {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        if (cm == null) return;
+
+        updateOfflineBanner(isOnline(cm));
+
+        NetworkRequest request = new NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build();
+
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network network) {
+                runOnUiThread(() -> updateOfflineBanner(true));
+            }
+
+            @Override
+            public void onLost(Network network) {
+                runOnUiThread(() -> updateOfflineBanner(isOnline(cm)));
+            }
+        };
+
+        try {
+            cm.registerNetworkCallback(request, networkCallback);
+        } catch (Exception ignored) {
+            networkCallback = null;
+        }
+    }
+
+    private boolean isOnline(ConnectivityManager cm) {
+        Network network = cm.getActiveNetwork();
+        if (network == null) return false;
+        NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+        return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+    }
+
+    private void updateOfflineBanner(boolean online) {
+        offlineBanner.setVisibility(online ? View.GONE : View.VISIBLE);
+    }
+
     private int dpToPx(int dp) {
         float density = getResources().getDisplayMetrics().density;
         return Math.round(dp * density);
@@ -503,8 +698,13 @@ public class MainActivity extends AppCompatActivity {
     public void onBackPressed() {
         if (webView.canGoBack()) {
             webView.goBack();
-        } else {
-            super.onBackPressed();
+            return;
         }
+        if (backPressedAt + 2000 > System.currentTimeMillis()) {
+            super.onBackPressed();
+            return;
+        }
+        backPressedAt = System.currentTimeMillis();
+        Toast.makeText(this, "Press back again to exit", Toast.LENGTH_SHORT).show();
     }
 }
