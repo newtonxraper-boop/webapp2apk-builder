@@ -15,6 +15,7 @@ import io
 import json
 import os
 import re
+import time
 import urllib.request
 
 TEMPLATE_ROOT = "android-template"
@@ -198,6 +199,11 @@ def main():
     push_enabled = bool_literal("PUSH_ENABLED", False)
     filecamera_enabled = bool_literal("FILECAMERA_ENABLED", True)
 
+    # A Unix timestamp is always higher than the previous build's, which is
+    # exactly what versionCode needs to be for Android's own update-comparison
+    # rules, and for the app's own in-app "a newer version exists" check.
+    version_code = str(int(time.time()))
+
     # Firebase config is optional. If not supplied, we deliberately LEAVE the
     # {{FIREBASE_*}} placeholders in strings.xml untouched - App.java checks
     # `apiKey.startsWith("{{")` and silently skips Firebase init in that case.
@@ -219,6 +225,7 @@ def main():
         "{{SPLASH_ENABLED}}": splash_enabled,
         "{{PUSH_ENABLED}}": push_enabled,
         "{{FILECAMERA_ENABLED}}": filecamera_enabled,
+        "{{VERSION_CODE}}": version_code,
     }
     for placeholder, value in firebase_env.items():
         if value:

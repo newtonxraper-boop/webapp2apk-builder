@@ -36,7 +36,7 @@
 
         <activity
             android:name="com.webapp2apk.generated.MainActivity"
-            android:exported="false"
+            android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.WebApp2Apk" />
 

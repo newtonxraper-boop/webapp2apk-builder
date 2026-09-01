@@ -4,7 +4,9 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.DownloadManager;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -19,10 +21,15 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
 import android.webkit.URLUtil;
 import android.widget.Toast;
+import androidx.core.content.pm.PackageInfoCompat;
+import androidx.core.content.pm.ShortcutInfoCompat;
+import androidx.core.content.pm.ShortcutManagerCompat;
+import androidx.core.graphics.drawable.IconCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 import android.webkit.CookieManager;
@@ -70,6 +77,7 @@ public class MainActivity extends AppCompatActivity {
     private ProgressBar progressBar;
     private LinearLayout bottomTabBar;
     private TextView offlineBanner;
+    private TextView updateBanner;
     private View shareButton;
 
     private String homeUrl;
@@ -117,12 +125,18 @@ public class MainActivity extends AppCompatActivity {
         progressBar = findViewById(R.id.progressBar);
         bottomTabBar = findViewById(R.id.bottomTabBar);
         offlineBanner = findViewById(R.id.offlineBanner);
+        updateBanner = findViewById(R.id.updateBanner);
         shareButton = findViewById(R.id.shareButton);
 
         JSONObject config = App.appConfig;
         homeUrl = config.optString("app_url", getString(R.string.app_url));
         filecameraEnabled = config.optBoolean("filecamera_enabled", true);
-        currentActiveUrl = homeUrl;
+
+        // A home-screen shortcut launches MainActivity with this extra set to
+        // jump straight to that tab's URL instead of the usual home page.
+        String shortcutUrl = getIntent() != null ? getIntent().getStringExtra("shortcut_url") : null;
+        String startUrl = (shortcutUrl != null && !shortcutUrl.isEmpty()) ? shortcutUrl : homeUrl;
+        currentActiveUrl = startUrl;
 
         offlineCacheDir = new File(getFilesDir(), "webcache");
         if (!offlineCacheDir.exists()) offlineCacheDir.mkdirs();
@@ -134,8 +148,10 @@ public class MainActivity extends AppCompatActivity {
         setupConnectivityBanner();
         setupSwipeRefresh();
         setupBottomTabs();
+        setupHomeScreenShortcuts();
+        checkForAppUpdate();
 
-        webView.loadUrl(homeUrl);
+        webView.loadUrl(startUrl);
     }
 
     @Override
@@ -223,6 +239,8 @@ public class MainActivity extends AppCompatActivity {
 
     @SuppressLint("SetJavaScriptEnabled")
     private void setupWebView() {
+        applySystemThemeBackground();
+
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -244,6 +262,31 @@ public class MainActivity extends AppCompatActivity {
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 if (!request.isForMainFrame()) return null;
                 return maybeServeFromOfflineCache(request);
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                String scheme = uri.getScheme();
+                if (scheme == null) return false;
+
+                if (!scheme.equals("http") && !scheme.equals("https")) {
+                    // tel:, mailto:, whatsapp:, intent:, market:, upi:, etc. -
+                    // always hand off to whatever app the OS has for it.
+                    return openExternally(uri);
+                }
+
+                Uri homeUri = Uri.parse(homeUrl);
+                if (homeUri.getHost() != null && homeUri.getHost().equalsIgnoreCase(uri.getHost())) {
+                    return false; // same site - handle it inside the app as normal
+                }
+
+                // A different domain - most commonly a Google/OAuth login screen
+                // or a Mobile Money payment gateway redirect, both of which are
+                // frequently blocked or broken inside a plain embedded WebView.
+                // Hand off to the phone's real browser/app instead of trapping
+                // the user on a page that may not even let them proceed.
+                return openExternally(uri);
             }
 
             @Override
@@ -510,7 +553,15 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * The share button is draggable so it can be moved out of the way of any
+     * floating buttons the website itself already has in that corner (chat
+     * widgets, "add to cart" bubbles, etc.) - a tap still shares the page;
+     * only a real drag moves it. Position is remembered between app opens.
+     */
     private void setupShareButton() {
+        restoreShareButtonPosition();
+
         shareButton.setOnClickListener(v -> {
             String url = webView.getUrl();
             if (url == null || url.startsWith("file:///android_asset/")) url = homeUrl;
@@ -524,6 +575,176 @@ public class MainActivity extends AppCompatActivity {
             shareIntent.putExtra(Intent.EXTRA_TEXT, url);
             startActivity(Intent.createChooser(shareIntent, "Share via"));
         });
+
+        final float[] touchOffsetX = new float[1];
+        final float[] touchOffsetY = new float[1];
+        final float[] downRawX = new float[1];
+        final float[] downRawY = new float[1];
+        final boolean[] isDragging = {false};
+
+        shareButton.setOnTouchListener((v, event) -> {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    touchOffsetX[0] = v.getX() - event.getRawX();
+                    touchOffsetY[0] = v.getY() - event.getRawY();
+                    downRawX[0] = event.getRawX();
+                    downRawY[0] = event.getRawY();
+                    isDragging[0] = false;
+                    return true;
+
+                case MotionEvent.ACTION_MOVE: {
+                    View parent = (View) v.getParent();
+                    float newX = event.getRawX() + touchOffsetX[0];
+                    float newY = event.getRawY() + touchOffsetY[0];
+                    newX = Math.max(0, Math.min(newX, parent.getWidth() - v.getWidth()));
+                    newY = Math.max(0, Math.min(newY, parent.getHeight() - v.getHeight()));
+                    v.setX(newX);
+                    v.setY(newY);
+
+                    float moved = Math.abs(event.getRawX() - downRawX[0]) + Math.abs(event.getRawY() - downRawY[0]);
+                    if (moved > dpToPx(8)) isDragging[0] = true;
+                    return true;
+                }
+
+                case MotionEvent.ACTION_UP:
+                    if (isDragging[0]) {
+                        saveShareButtonPosition(v.getX(), v.getY());
+                    } else {
+                        v.performClick();
+                    }
+                    return true;
+
+                default:
+                    return false;
+            }
+        });
+    }
+
+    private void restoreShareButtonPosition() {
+        android.content.SharedPreferences prefs = getSharedPreferences("webapp2apk_prefs", MODE_PRIVATE);
+        if (!prefs.contains("share_btn_x")) return; // keep the default XML corner position
+
+        shareButton.post(() -> {
+            float x = prefs.getFloat("share_btn_x", shareButton.getX());
+            float y = prefs.getFloat("share_btn_y", shareButton.getY());
+            shareButton.setX(x);
+            shareButton.setY(y);
+        });
+    }
+
+    private void saveShareButtonPosition(float x, float y) {
+        getSharedPreferences("webapp2apk_prefs", MODE_PRIVATE)
+                .edit()
+                .putFloat("share_btn_x", x)
+                .putFloat("share_btn_y", y)
+                .apply();
+    }
+
+    private boolean openExternally(Uri uri) {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, uri));
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Sets the WebView's background to match the phone's system dark/light
+     * mode before any page loads, so there's no jarring white flash while
+     * the real page content is still loading in.
+     */
+    private void applySystemThemeBackground() {
+        int uiMode = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        boolean isDarkMode = uiMode == Configuration.UI_MODE_NIGHT_YES;
+        webView.setBackgroundColor(isDarkMode ? Color.parseColor("#171A21") : Color.WHITE);
+    }
+
+    /**
+     * Builds home-screen long-press shortcuts from the same nav_items.json
+     * used for the bottom tab bar, so users can jump straight to a section
+     * without opening the app to its home page first.
+     */
+    private void setupHomeScreenShortcuts() {
+        try {
+            JSONArray navItems = loadNavItems();
+            if (navItems == null || navItems.length() == 0) return;
+
+            List<ShortcutInfoCompat> shortcuts = new ArrayList<>();
+            int max = Math.min(navItems.length(), 4);
+            for (int i = 0; i < max; i++) {
+                JSONObject item = navItems.optJSONObject(i);
+                if (item == null) continue;
+                String label = item.optString("label", "Tab" + i);
+                String url = item.optString("url", homeUrl);
+
+                Intent shortcutIntent = new Intent(this, MainActivity.class);
+                shortcutIntent.setAction(Intent.ACTION_VIEW);
+                shortcutIntent.putExtra("shortcut_url", url);
+                shortcutIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+
+                ShortcutInfoCompat shortcut = new ShortcutInfoCompat.Builder(this, "tab_" + i)
+                        .setShortLabel(label)
+                        .setIcon(IconCompat.createWithResource(this, R.mipmap.ic_launcher))
+                        .setIntent(shortcutIntent)
+                        .build();
+                shortcuts.add(shortcut);
+            }
+
+            if (!shortcuts.isEmpty()) {
+                ShortcutManagerCompat.setDynamicShortcuts(this, shortcuts);
+            }
+        } catch (Exception ignored) {
+            // Shortcuts are a nice-to-have - never let a failure here affect the app itself.
+        }
+    }
+
+    /**
+     * Optionally checks {yourdomain}/version.json for a newer build. Fully
+     * opt-in: if that file doesn't exist, this silently does nothing - there
+     * is no other backend requirement for the rest of the app to work.
+     * Publishing {"version_code": N, "apk_url": "..."} there is enough to
+     * turn it on for any given app.
+     */
+    private void checkForAppUpdate() {
+        new Thread(() -> {
+            try {
+                Uri homeUri = Uri.parse(homeUrl);
+                String versionUrl = homeUri.getScheme() + "://" + homeUri.getHost() + "/version.json";
+
+                HttpURLConnection conn = (HttpURLConnection) new URL(versionUrl).openConnection();
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(5000);
+                int status = conn.getResponseCode();
+                if (status != 200) {
+                    conn.disconnect();
+                    return;
+                }
+
+                byte[] data = readAllBytes(conn.getInputStream());
+                conn.disconnect();
+                JSONObject versionInfo = new JSONObject(new String(data, "UTF-8"));
+
+                long latestVersionCode = versionInfo.optLong("version_code", -1);
+                String apkUrl = versionInfo.optString("apk_url", "");
+                if (latestVersionCode <= 0 || apkUrl.isEmpty()) return;
+
+                PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
+                long currentVersionCode = PackageInfoCompat.getLongVersionCode(packageInfo);
+
+                if (latestVersionCode > currentVersionCode) {
+                    runOnUiThread(() -> showUpdateBanner(apkUrl));
+                }
+            } catch (Exception ignored) {
+                // No version.json published, or unreachable - this feature is
+                // fully optional and should never interrupt normal use.
+            }
+        }).start();
+    }
+
+    private void showUpdateBanner(String apkUrl) {
+        updateBanner.setVisibility(View.VISIBLE);
+        updateBanner.setOnClickListener(v -> openExternally(Uri.parse(apkUrl)));
     }
 
     /**
