@@ -21,7 +21,7 @@ import urllib.request
 TEMPLATE_ROOT = "android-template"
 
 # Only touch text-based files; skip binary assets (png, keystore, etc.)
-TEXT_EXTENSIONS = {".xml", ".gradle", ".json", ".java", ".properties", ".pro", ".txt", ".md"}
+TEXT_EXTENSIONS = {".xml", ".gradle", ".json", ".java", ".properties", ".pro", ".txt", ".md", ".html"}
 
 MIPMAP_SIZES = {
     "mipmap-mdpi": 48,
@@ -158,14 +158,14 @@ def process_icon(icon_url: str) -> bool:
         os.makedirs(dest_dir, exist_ok=True)
 
         resized = src.resize((size, size), Image.LANCZOS)
-        resized.save(os.path.join(dest_dir, "ic_launcher.png"))
+        resized.save(os.path.join(dest_dir, "ic_launcher.png"), optimize=True)
 
         # Circular-masked variant for ic_launcher_round (legacy/pre-API26 devices)
         mask = Image.new("L", (size, size), 0)
         ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
         round_icon = Image.new("RGBA", (size, size))
         round_icon.paste(resized, (0, 0), mask=mask)
-        round_icon.save(os.path.join(dest_dir, "ic_launcher_round.png"))
+        round_icon.save(os.path.join(dest_dir, "ic_launcher_round.png"), optimize=True)
 
     for folder, canvas_size in ADAPTIVE_FOREGROUND_SIZES.items():
         dest_dir = os.path.join(TEMPLATE_ROOT, "app", "src", "main", "res", folder)
@@ -176,7 +176,7 @@ def process_icon(icon_url: str) -> bool:
         canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
         offset = (canvas_size - icon_size) // 2
         canvas.paste(fg_resized, (offset, offset), fg_resized)
-        canvas.save(os.path.join(dest_dir, "ic_launcher_foreground.png"))
+        canvas.save(os.path.join(dest_dir, "ic_launcher_foreground.png"), optimize=True)
 
     print("Custom app icon applied (legacy + adaptive foreground, all densities).")
     return True

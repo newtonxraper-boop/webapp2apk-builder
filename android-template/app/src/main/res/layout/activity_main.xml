@@ -72,13 +72,27 @@
 
     </FrameLayout>
 
-    <LinearLayout
-        android:id="@+id/bottomTabBar"
+    <FrameLayout
+        android:id="@+id/bottomTabBarContainer"
         android:layout_width="match_parent"
         android:layout_height="64dp"
-        android:orientation="horizontal"
-        android:background="@color/tab_bg"
+        android:background="@drawable/bottom_nav_bg"
         android:elevation="8dp"
-        android:visibility="gone" />
+        android:visibility="gone">
+
+        <View
+            android:id="@+id/tabIndicator"
+            android:layout_width="0dp"
+            android:layout_height="3dp"
+            android:layout_gravity="top|start"
+            android:background="@color/accent_color" />
+
+        <LinearLayout
+            android:id="@+id/bottomTabBar"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="horizontal" />
+
+    </FrameLayout>
 
 </LinearLayout>

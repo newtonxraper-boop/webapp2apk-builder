@@ -9,14 +9,19 @@
     flex-direction:column; font-family:sans-serif; background:#171a21; color:#e8eaed;
     text-align:center; padding:24px;
   }
-  h2{margin:16px 0 8px;}
+  h2{margin:16px 0 8px; color:{{ACCENT_COLOR}};}
   p{color:#9aa0a6; font-size:14px; margin:0;}
   .icon{font-size:48px;}
+  .retry{
+    margin-top:20px; padding:10px 20px; border-radius:999px; border:none;
+    background:{{PRIMARY_COLOR}}; color:#04150a; font-weight:700; font-size:13px;
+  }
 </style>
 </head>
 <body>
   <div class="icon">📡</div>
   <h2>You're offline</h2>
   <p>Pull down to try again once you're back online.</p>
+  <button class="retry" onclick="location.reload()">Try again</button>
 </body>
 </html>

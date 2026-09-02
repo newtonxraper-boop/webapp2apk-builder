@@ -25,13 +25,13 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
 import android.webkit.URLUtil;
-import android.widget.Toast;
 import androidx.core.content.pm.PackageInfoCompat;
 import androidx.core.content.pm.ShortcutInfoCompat;
 import androidx.core.content.pm.ShortcutManagerCompat;
 import androidx.core.graphics.drawable.IconCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
+import com.google.android.material.snackbar.Snackbar;
 import android.webkit.CookieManager;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
@@ -76,6 +76,8 @@ public class MainActivity extends AppCompatActivity {
     private SwipeRefreshLayout swipeRefresh;
     private ProgressBar progressBar;
     private LinearLayout bottomTabBar;
+    private View bottomTabBarContainer;
+    private View tabIndicator;
     private TextView offlineBanner;
     private TextView updateBanner;
     private View shareButton;
@@ -94,8 +96,15 @@ public class MainActivity extends AppCompatActivity {
     // Exit confirmation - back press only exits if pressed twice within 2s.
     private long backPressedAt = 0;
 
-    // Offline banner tracking.
+    // Offline banner tracking, debounced so a flaky connection doesn't flicker it.
     private ConnectivityManager.NetworkCallback networkCallback;
+    private final android.os.Handler bannerDebounceHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private Runnable pendingBannerUpdate;
+
+    // Set when shouldInterceptRequest already confirmed nothing is cached for
+    // a same-origin URL, so onReceivedError can skip a second, pointless
+    // cache lookup and go straight to the offline page.
+    private String lastConfirmedCacheMissUrl;
 
     // Bottom nav tab bookkeeping - lets us re-tint icons/labels when the
     // active tab changes, without rebuilding the whole bar.
@@ -110,7 +119,10 @@ public class MainActivity extends AppCompatActivity {
     // connection), and only fall back to the last saved copy when the network
     // request truly fails. This is what makes pages "stay on the phone" until
     // there's an actual update.
-    private static final long MAX_CACHE_BYTES = 25L * 1024 * 1024; // 25 MB cap
+    private static final long MAX_CACHE_BYTES_CAP = 100L * 1024 * 1024; // never exceed 100 MB regardless of free space
+    private static final long MAX_CACHE_BYTES_FLOOR = 10L * 1024 * 1024; // always allow at least 10 MB
+    private long maxCacheBytes = 25L * 1024 * 1024; // sensible default until computed from real free space
+    private android.animation.ObjectAnimator progressPulseAnimator;
     private File offlineCacheDir;
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -124,6 +136,8 @@ public class MainActivity extends AppCompatActivity {
         swipeRefresh = findViewById(R.id.swipeRefresh);
         progressBar = findViewById(R.id.progressBar);
         bottomTabBar = findViewById(R.id.bottomTabBar);
+        bottomTabBarContainer = findViewById(R.id.bottomTabBarContainer);
+        tabIndicator = findViewById(R.id.tabIndicator);
         offlineBanner = findViewById(R.id.offlineBanner);
         updateBanner = findViewById(R.id.updateBanner);
         shareButton = findViewById(R.id.shareButton);
@@ -140,6 +154,7 @@ public class MainActivity extends AppCompatActivity {
 
         offlineCacheDir = new File(getFilesDir(), "webcache");
         if (!offlineCacheDir.exists()) offlineCacheDir.mkdirs();
+        maxCacheBytes = computeCacheSizeLimit();
 
         setupActivityResultLaunchers();
         setupWebView();
@@ -230,7 +245,7 @@ public class MainActivity extends AppCompatActivity {
                     if (granted && pendingDownloadRequest != null) {
                         enqueueDownload(pendingDownloadRequest, pendingDownloadFileName);
                     } else if (!granted) {
-                        Toast.makeText(this, "Download needs storage permission", Toast.LENGTH_SHORT).show();
+                        showSnackbar("Download needs storage permission");
                     }
                     pendingDownloadRequest = null;
                     pendingDownloadFileName = null;
@@ -250,6 +265,14 @@ public class MainActivity extends AppCompatActivity {
         settings.setBuiltInZoomControls(false);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setAllowFileAccess(true);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // Tells Android not to deprioritize this WebView's renderer under
+            // memory pressure while the app is in the foreground.
+            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true);
+        }
+
+        swipeRefresh.setColorSchemeColors(ContextCompat.getColor(this, R.color.accent_color));
 
         webView.setWebViewClient(new WebViewClient() {
             // Secondary safety net: if a page still fails after our own
@@ -293,6 +316,9 @@ public class MainActivity extends AppCompatActivity {
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
                 progressBar.setVisibility(View.VISIBLE);
+                startProgressPulse();
+                view.animate().cancel();
+                view.setAlpha(0.3f);
             }
 
             @Override
@@ -300,10 +326,13 @@ public class MainActivity extends AppCompatActivity {
                 super.onReceivedError(view, request, error);
                 if (!request.isForMainFrame()) return;
 
-                if (!cacheRetryInProgress) {
+                String failedUrl = request.getUrl().toString();
+                boolean alreadyConfirmedMissing = failedUrl.equals(lastConfirmedCacheMissUrl);
+
+                if (!cacheRetryInProgress && !alreadyConfirmedMissing) {
                     cacheRetryInProgress = true;
                     view.getSettings().setCacheMode(WebSettings.LOAD_CACHE_ONLY);
-                    view.loadUrl(request.getUrl().toString());
+                    view.loadUrl(failedUrl);
                 } else {
                     cacheRetryInProgress = false;
                     view.getSettings().setCacheMode(WebSettings.LOAD_DEFAULT);
@@ -315,6 +344,8 @@ public class MainActivity extends AppCompatActivity {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 progressBar.setVisibility(View.GONE);
+                stopProgressPulse();
+                view.animate().alpha(1f).setDuration(250).start();
                 swipeRefresh.setRefreshing(false);
                 if (cacheRetryInProgress) {
                     cacheRetryInProgress = false;
@@ -450,10 +481,12 @@ public class MainActivity extends AppCompatActivity {
                 String encoding = parts.length > 1 ? parts[1] : "UTF-8";
                 return new WebResourceResponse(mimeType, encoding, new FileInputStream(bodyFile));
             } catch (Exception ignored) {
+                lastConfirmedCacheMissUrl = uri.toString();
                 return null;
             }
         }
 
+        lastConfirmedCacheMissUrl = uri.toString();
         return null;
     }
 
@@ -490,18 +523,55 @@ public class MainActivity extends AppCompatActivity {
         if (files == null) return;
         long total = 0;
         for (File f : files) total += f.length();
-        if (total <= MAX_CACHE_BYTES) return;
+        if (total <= maxCacheBytes) return;
 
         Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
         for (File f : files) {
-            if (total <= MAX_CACHE_BYTES) break;
+            if (total <= maxCacheBytes) break;
             total -= f.length();
             f.delete();
         }
     }
 
+    /**
+     * Uses 5% of the device's free internal storage as the offline cache
+     * budget, bounded between 10MB and 100MB, instead of one fixed number
+     * that could be wasteful on a spacious phone or too greedy on a nearly-full one.
+     */
+    private long computeCacheSizeLimit() {
+        try {
+            android.os.StatFs stat = new android.os.StatFs(getFilesDir().getPath());
+            long freeBytes = stat.getAvailableBytes();
+            long budget = freeBytes / 20; // 5%
+            return Math.max(MAX_CACHE_BYTES_FLOOR, Math.min(MAX_CACHE_BYTES_CAP, budget));
+        } catch (Exception e) {
+            return MAX_CACHE_BYTES_FLOOR;
+        }
+    }
+
     private void setupSwipeRefresh() {
         swipeRefresh.setOnRefreshListener(() -> webView.loadUrl(homeUrl));
+    }
+
+    /**
+     * A gentle breathing effect on the loading spinner while a page loads -
+     * a lightweight stand-in for a true content-shaped skeleton screen, which
+     * isn't really possible generically since every site's layout is different.
+     */
+    private void startProgressPulse() {
+        if (progressPulseAnimator != null) progressPulseAnimator.cancel();
+        progressPulseAnimator = android.animation.ObjectAnimator.ofFloat(progressBar, "alpha", 1f, 0.35f, 1f);
+        progressPulseAnimator.setDuration(900);
+        progressPulseAnimator.setRepeatCount(android.animation.ObjectAnimator.INFINITE);
+        progressPulseAnimator.start();
+    }
+
+    private void stopProgressPulse() {
+        if (progressPulseAnimator != null) {
+            progressPulseAnimator.cancel();
+            progressPulseAnimator = null;
+        }
+        progressBar.setAlpha(1f);
     }
 
     /**
@@ -536,7 +606,7 @@ public class MainActivity extends AppCompatActivity {
                     enqueueDownload(request, fileName);
                 }
             } catch (Exception e) {
-                Toast.makeText(this, "Could not start download", Toast.LENGTH_SHORT).show();
+                showSnackbar("Could not start download");
             }
         });
     }
@@ -546,10 +616,10 @@ public class MainActivity extends AppCompatActivity {
             DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
             if (dm != null) {
                 dm.enqueue(request);
-                Toast.makeText(this, "Downloading " + fileName, Toast.LENGTH_SHORT).show();
+                showSnackbar("Downloading " + fileName);
             }
         } catch (Exception e) {
-            Toast.makeText(this, "Could not start download", Toast.LENGTH_SHORT).show();
+            showSnackbar("Could not start download");
         }
     }
 
@@ -563,6 +633,7 @@ public class MainActivity extends AppCompatActivity {
         restoreShareButtonPosition();
 
         shareButton.setOnClickListener(v -> {
+            v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
             String url = webView.getUrl();
             if (url == null || url.startsWith("file:///android_asset/")) url = homeUrl;
             String title = webView.getTitle();
@@ -590,6 +661,7 @@ public class MainActivity extends AppCompatActivity {
                     downRawX[0] = event.getRawX();
                     downRawY[0] = event.getRawY();
                     isDragging[0] = false;
+                    v.animate().scaleX(0.88f).scaleY(0.88f).setDuration(100).start();
                     return true;
 
                 case MotionEvent.ACTION_MOVE: {
@@ -607,6 +679,7 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 case MotionEvent.ACTION_UP:
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
                     if (isDragging[0]) {
                         saveShareButtonPosition(v.getX(), v.getY());
                     } else {
@@ -790,7 +863,19 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateOfflineBanner(boolean online) {
-        offlineBanner.setVisibility(online ? View.GONE : View.VISIBLE);
+        if (pendingBannerUpdate != null) bannerDebounceHandler.removeCallbacks(pendingBannerUpdate);
+        pendingBannerUpdate = () -> offlineBanner.setVisibility(online ? View.GONE : View.VISIBLE);
+        // Going offline is shown right away (immediate feedback matters more);
+        // coming back online waits briefly in case it's just a flicker.
+        bannerDebounceHandler.postDelayed(pendingBannerUpdate, online ? 600 : 0);
+    }
+
+    private void showSnackbar(String message) {
+        View root = findViewById(android.R.id.content);
+        Snackbar snackbar = Snackbar.make(root, message, Snackbar.LENGTH_SHORT);
+        snackbar.setBackgroundTint(ContextCompat.getColor(this, R.color.primary_dark_color));
+        snackbar.setTextColor(ContextCompat.getColor(this, android.R.color.white));
+        snackbar.show();
     }
 
     private int dpToPx(int dp) {
@@ -809,11 +894,11 @@ public class MainActivity extends AppCompatActivity {
     private void setupBottomTabs() {
         JSONArray navItems = loadNavItems();
         if (navItems == null || navItems.length() == 0) {
-            bottomTabBar.setVisibility(View.GONE);
+            bottomTabBarContainer.setVisibility(View.GONE);
             return;
         }
 
-        bottomTabBar.setVisibility(View.VISIBLE);
+        bottomTabBarContainer.setVisibility(View.VISIBLE);
         bottomTabBar.removeAllViews();
         tabContainers.clear();
         tabUrls.clear();
@@ -873,9 +958,11 @@ public class MainActivity extends AppCompatActivity {
             tabContainer.addView(iconView);
             tabContainer.addView(labelView);
             tabContainer.setOnClickListener(v -> {
+                v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
                 currentActiveUrl = url;
                 webView.loadUrl(url);
                 refreshTabHighlighting();
+                moveIndicatorToActiveTab();
             });
 
             bottomTabBar.addView(tabContainer);
@@ -884,6 +971,28 @@ public class MainActivity extends AppCompatActivity {
         }
 
         refreshTabHighlighting();
+        moveIndicatorToActiveTab();
+    }
+
+    /**
+     * Slides the thin accent-colored strip along the top of the bottom nav
+     * bar to sit under whichever tab is currently active, instead of just
+     * swapping icon/label colors with no motion.
+     */
+    private void moveIndicatorToActiveTab() {
+        if (tabIndicator == null || tabUrls.isEmpty()) return;
+        int activeIndex = tabUrls.indexOf(currentActiveUrl);
+        if (activeIndex < 0) activeIndex = 0;
+        final int idx = activeIndex;
+
+        bottomTabBar.post(() -> {
+            int tabWidth = bottomTabBar.getWidth() / Math.max(1, tabUrls.size());
+            if (tabWidth <= 0) return;
+            android.view.ViewGroup.LayoutParams params = tabIndicator.getLayoutParams();
+            params.width = tabWidth;
+            tabIndicator.setLayoutParams(params);
+            tabIndicator.animate().x(tabWidth * idx).setDuration(200).start();
+        });
     }
 
     private void refreshTabHighlighting() {
@@ -926,6 +1035,6 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         backPressedAt = System.currentTimeMillis();
-        Toast.makeText(this, "Press back again to exit", Toast.LENGTH_SHORT).show();
+        showSnackbar("Press back again to exit");
     }
 }
