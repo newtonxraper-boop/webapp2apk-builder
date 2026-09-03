@@ -15,7 +15,12 @@ import java.net.URL;
 
 public class SplashActivity extends AppCompatActivity {
 
-    private static final int SPLASH_DELAY_MS = 1200;
+    private static final long MAX_SPLASH_DELAY_MS = 1200;
+    private static final long MIN_SPLASH_DELAY_MS = 500;
+    private static final long FAST_CONNECTION_THRESHOLD_MS = 400;
+
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private boolean navigated = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -30,26 +35,48 @@ public class SplashActivity extends AppCompatActivity {
         // App.onCreate() runs before any Activity.onCreate(), so appConfig is
         // already populated here.
         boolean splashEnabled = App.appConfig.optBoolean("splash_enabled", true);
-        long delay = splashEnabled ? SPLASH_DELAY_MS : 0;
-
         String homeUrl = App.appConfig.optString("app_url", getString(R.string.app_url));
-        preconnectToHomeDomain(homeUrl);
+
         preWarmWebViewEngine();
 
-        new Handler(Looper.getMainLooper()).postDelayed(() -> {
-            startActivity(new Intent(SplashActivity.this, MainActivity.class));
-            finish();
-            overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out);
-        }, delay);
+        if (!splashEnabled) {
+            navigateToMain();
+            return;
+        }
+
+        // Always navigate after the max delay no matter what, so a slow or
+        // failed preconnect check never leaves the splash screen stuck.
+        mainHandler.postDelayed(this::navigateToMain, MAX_SPLASH_DELAY_MS);
+
+        long startTime = System.currentTimeMillis();
+        preconnectToHomeDomain(homeUrl, () -> {
+            // A fast, successful connection check means the site is reachable
+            // and responsive right now - no need to make the user wait out
+            // the full splash duration just for brand visibility.
+            long elapsed = System.currentTimeMillis() - startTime;
+            if (elapsed >= FAST_CONNECTION_THRESHOLD_MS || navigated) return;
+
+            long remaining = Math.max(0, MIN_SPLASH_DELAY_MS - elapsed);
+            mainHandler.postDelayed(this::navigateToMain, remaining);
+        });
+    }
+
+    private void navigateToMain() {
+        if (navigated) return;
+        navigated = true;
+        startActivity(new Intent(SplashActivity.this, MainActivity.class));
+        finish();
+        overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out);
     }
 
     /**
      * Fires a lightweight HEAD request to the app's own domain during the
      * splash delay, purely to warm up DNS/TCP/TLS ahead of time so the first
      * real page request in MainActivity starts from a head start instead of
-     * a cold connection. Result is completely ignored either way.
+     * a cold connection. onDone is only invoked when the request actually
+     * succeeded, and is posted back to the main thread.
      */
-    private void preconnectToHomeDomain(String homeUrl) {
+    private void preconnectToHomeDomain(String homeUrl, Runnable onDone) {
         new Thread(() -> {
             try {
                 Uri uri = Uri.parse(homeUrl);
@@ -61,11 +88,15 @@ public class SplashActivity extends AppCompatActivity {
                 conn.setRequestMethod("HEAD");
                 conn.setConnectTimeout(4000);
                 conn.setReadTimeout(4000);
-                conn.getResponseCode();
+                int status = conn.getResponseCode();
                 conn.disconnect();
+
+                if (status > 0) {
+                    mainHandler.post(onDone);
+                }
             } catch (Exception ignored) {
-                // Purely a warm-up attempt - failing here has no effect on the
-                // real page load MainActivity will perform normally afterward.
+                // Purely a warm-up/speed check - a failure here just means the
+                // splash keeps its normal full duration, nothing else changes.
             }
         }).start();
     }

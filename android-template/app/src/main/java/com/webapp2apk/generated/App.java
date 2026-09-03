@@ -18,7 +18,11 @@ public class App extends Application {
     public void onCreate() {
         super.onCreate();
         loadAppConfig();
-        maybeInitFirebase();
+        // Deferred to the next main-thread loop iteration so Firebase SDK
+        // initialization never blocks the very first frame the user sees -
+        // appConfig itself is still loaded synchronously above since
+        // Splash/MainActivity depend on it being ready immediately.
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(this::maybeInitFirebase);
     }
 
     private void loadAppConfig() {

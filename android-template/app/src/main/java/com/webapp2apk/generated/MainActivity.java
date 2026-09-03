@@ -132,6 +132,16 @@ public class MainActivity extends AppCompatActivity {
     private int cacheWriteCountSinceLastScan = 0;
     private boolean connectivityCallbackRegistered = false;
     private boolean shortcutsRegistered = false;
+    private boolean homePrefetchTriggered = false;
+
+    private long lastCookieFlushTime = 0;
+    private static final long COOKIE_FLUSH_MIN_INTERVAL_MS = 2000;
+
+    private String lastDownloadUrl;
+    private long lastDownloadTime = 0;
+    private static final long DOWNLOAD_DEBOUNCE_MS = 2000;
+
+    private static final long UPDATE_CHECK_MIN_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -180,10 +190,22 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         super.onPause();
+        // Stops JS timers, animations, and any playing video/audio while
+        // backgrounded instead of letting the WebView keep running invisibly -
+        // real battery/CPU savings, not just a formality.
+        webView.onPause();
+        webView.pauseTimers();
         // Final safety net so a session cookie set right before the user
         // backgrounds or closes the app is durably saved, not just held in
         // memory waiting for the system's own periodic flush.
         CookieManager.getInstance().flush();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        webView.onResume();
+        webView.resumeTimers();
     }
 
     @Override
@@ -392,7 +414,13 @@ public class MainActivity extends AppCompatActivity {
                 stopProgressPulse();
                 view.animate().alpha(1f).setDuration(250).start();
                 swipeRefresh.setRefreshing(false);
-                CookieManager.getInstance().flush();
+                maybeFlushCookies();
+
+                if (!homePrefetchTriggered && homeUrl.equals(url)) {
+                    homePrefetchTriggered = true;
+                    prefetchNavTabs();
+                }
+
                 if (cacheRetryInProgress) {
                     cacheRetryInProgress = false;
                     view.getSettings().setCacheMode(WebSettings.LOAD_DEFAULT);
@@ -466,6 +494,12 @@ public class MainActivity extends AppCompatActivity {
             return null;
         }
 
+        if (isSensitiveUrl(uri)) {
+            // Login/checkout/payment-style pages shouldn't be cached or
+            // replayed offline - let WebView handle these completely normally.
+            return null;
+        }
+
         String cacheKey = sha256(uri.toString());
         File bodyFile = new File(offlineCacheDir, cacheKey + ".body.gz");
         File metaFile = new File(offlineCacheDir, cacheKey + ".meta");
@@ -476,6 +510,33 @@ public class MainActivity extends AppCompatActivity {
             return serveFromCacheFile(bodyFile, metaFile, uri);
         }
 
+        return fetchAndCache(uri, bodyFile, metaFile);
+    }
+
+    private static final String[] SENSITIVE_URL_KEYWORDS = {
+            "login", "logout", "signin", "signup", "checkout", "payment", "cart"
+    };
+
+    private boolean isSensitiveUrl(Uri uri) {
+        String path = uri.getPath();
+        if (path == null) return false;
+        String lower = path.toLowerCase();
+        for (String keyword : SENSITIVE_URL_KEYWORDS) {
+            if (lower.contains(keyword)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Fetches a URL fresh over the network (sending along any previously
+     * cached ETag/Last-Modified so an unchanged page gets back a cheap 304
+     * instead of the full body again), writes the result to the offline
+     * cache, and returns it as a WebResourceResponse. Falls back to whatever
+     * is already cached if the network attempt fails outright. Also used
+     * for background tab prefetching, where the returned response is simply
+     * discarded - the point there is only the cache-write side effect.
+     */
+    private WebResourceResponse fetchAndCache(Uri uri, File bodyFile, File metaFile) {
         try {
             HttpURLConnection conn = (HttpURLConnection) new URL(uri.toString()).openConnection();
             conn.setConnectTimeout(8000);
@@ -487,13 +548,29 @@ public class MainActivity extends AppCompatActivity {
             String cookie = cookieManager.getCookie(uri.toString());
             if (cookie != null) conn.setRequestProperty("Cookie", cookie);
 
+            String[] existingMeta = readMetaParts(metaFile);
+            if (existingMeta != null) {
+                if (!existingMeta[2].isEmpty()) conn.setRequestProperty("If-None-Match", existingMeta[2]);
+                if (!existingMeta[3].isEmpty()) conn.setRequestProperty("If-Modified-Since", existingMeta[3]);
+            }
+
             int status = conn.getResponseCode();
+
+            if (status == 304 && bodyFile.exists()) {
+                // Server confirms nothing changed - reuse the cached body
+                // instead of downloading it again, and touch its timestamp so
+                // LRU cache eviction still treats it as recently used.
+                conn.disconnect();
+                bodyFile.setLastModified(System.currentTimeMillis());
+                return serveFromCacheFile(bodyFile, metaFile, uri);
+            }
+
             if (status >= 200 && status < 300) {
                 Map<String, List<String>> headers = conn.getHeaderFields();
                 List<String> setCookies = headers.get("Set-Cookie");
                 if (setCookies != null) {
                     for (String sc : setCookies) cookieManager.setCookie(uri.toString(), sc);
-                    cookieManager.flush();
+                    maybeFlushCookies();
                 }
 
                 String contentType = conn.getContentType();
@@ -510,11 +587,14 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
 
+                String etag = conn.getHeaderField("ETag");
+                String lastModified = conn.getHeaderField("Last-Modified");
+
                 byte[] data = readAllBytes(conn.getInputStream());
                 conn.disconnect();
 
                 writeGzipFileQuietly(bodyFile, data);
-                writeFileQuietly(metaFile, (mimeType + "|" + encoding).getBytes("UTF-8"));
+                writeFileQuietly(metaFile, buildMetaString(mimeType, encoding, etag, lastModified).getBytes("UTF-8"));
                 maybeEnforceCacheSizeLimit();
 
                 return new WebResourceResponse(mimeType, encoding, new ByteArrayInputStream(data));
@@ -528,15 +608,34 @@ public class MainActivity extends AppCompatActivity {
         return serveFromCacheFile(bodyFile, metaFile, uri);
     }
 
+    private String[] readMetaParts(File metaFile) {
+        if (!metaFile.exists()) return null;
+        try {
+            String meta = new String(readAllBytes(new FileInputStream(metaFile)), "UTF-8");
+            String[] parts = meta.split("\\|", -1);
+            String[] result = new String[4]; // mimeType, encoding, etag, lastModified
+            for (int i = 0; i < 4; i++) result[i] = i < parts.length ? parts[i] : "";
+            return result;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String buildMetaString(String mimeType, String encoding, String etag, String lastModified) {
+        return mimeType + "|" + encoding + "|" + (etag != null ? etag : "") + "|" + (lastModified != null ? lastModified : "");
+    }
+
     private WebResourceResponse serveFromCacheFile(File bodyFile, File metaFile, Uri uri) {
         if (bodyFile.exists() && metaFile.exists()) {
             try {
-                String meta = new String(readAllBytes(new FileInputStream(metaFile)), "UTF-8");
-                String[] parts = meta.split("\\|", 2);
-                String mimeType = parts.length > 0 ? parts[0] : "text/html";
-                String encoding = parts.length > 1 ? parts[1] : "UTF-8";
-                byte[] data = readGzipFile(bodyFile);
-                return new WebResourceResponse(mimeType, encoding, new ByteArrayInputStream(data));
+                String[] meta = readMetaParts(metaFile);
+                String mimeType = meta != null && !meta[0].isEmpty() ? meta[0] : "text/html";
+                String encoding = meta != null && !meta[1].isEmpty() ? meta[1] : "UTF-8";
+                // Streamed straight from disk rather than buffered fully into
+                // memory first - matters most on low-RAM phones with larger
+                // cached pages.
+                InputStream stream = new java.util.zip.GZIPInputStream(new FileInputStream(bodyFile));
+                return new WebResourceResponse(mimeType, encoding, stream);
             } catch (Exception ignored) {
                 lastConfirmedCacheMissUrl = uri.toString();
                 return null;
@@ -573,13 +672,6 @@ public class MainActivity extends AppCompatActivity {
              java.util.zip.GZIPOutputStream gzos = new java.util.zip.GZIPOutputStream(fos)) {
             gzos.write(data);
         } catch (Exception ignored) {
-        }
-    }
-
-    private static byte[] readGzipFile(File file) throws java.io.IOException {
-        try (FileInputStream fis = new FileInputStream(file);
-             java.util.zip.GZIPInputStream gzis = new java.util.zip.GZIPInputStream(fis)) {
-            return readAllBytes(gzis);
         }
     }
 
@@ -642,6 +734,45 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
+     * Cookies get flushed to disk on essentially every page load; throttling
+     * that avoids redundant disk writes when a user is navigating quickly
+     * from page to page. onPause() still always flushes unconditionally as a
+     * final safety net regardless of this throttle.
+     */
+    private void maybeFlushCookies() {
+        long now = System.currentTimeMillis();
+        if (now - lastCookieFlushTime < COOKIE_FLUSH_MIN_INTERVAL_MS) return;
+        lastCookieFlushTime = now;
+        CookieManager.getInstance().flush();
+    }
+
+    /**
+     * Once the home page has loaded, quietly warms the offline cache for the
+     * other bottom-nav tabs in the background, so switching to them feels
+     * instant instead of triggering a fresh load the first time each is tapped.
+     */
+    private void prefetchNavTabs() {
+        if (tabUrls.isEmpty()) return;
+        final List<String> urlsToPrefetch = new ArrayList<>(tabUrls);
+
+        new Thread(() -> {
+            for (String tabUrl : urlsToPrefetch) {
+                if (tabUrl.equals(homeUrl)) continue;
+                try {
+                    Uri uri = Uri.parse(tabUrl);
+                    if (isSensitiveUrl(uri)) continue;
+                    String cacheKey = sha256(uri.toString());
+                    File bodyFile = new File(offlineCacheDir, cacheKey + ".body.gz");
+                    File metaFile = new File(offlineCacheDir, cacheKey + ".meta");
+                    fetchAndCache(uri, bodyFile, metaFile);
+                } catch (Exception ignored) {
+                    // A prefetch failing for one tab shouldn't affect the others.
+                }
+            }
+        }).start();
+    }
+
+    /**
      * A gentle breathing effect on the loading spinner while a page loads -
      * a lightweight stand-in for a true content-shaped skeleton screen, which
      * isn't really possible generically since every site's layout is different.
@@ -670,6 +801,13 @@ public class MainActivity extends AppCompatActivity {
      */
     private void setupDownloadListener() {
         webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
+            long now = System.currentTimeMillis();
+            if (url.equals(lastDownloadUrl) && (now - lastDownloadTime) < DOWNLOAD_DEBOUNCE_MS) {
+                return; // duplicate tap on the same link - ignore
+            }
+            lastDownloadUrl = url;
+            lastDownloadTime = now;
+
             try {
                 DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
                 String cookie = CookieManager.getInstance().getCookie(url);
@@ -866,6 +1004,10 @@ public class MainActivity extends AppCompatActivity {
      * turn it on for any given app.
      */
     private void checkForAppUpdate() {
+        long lastCheck = prefs.getLong("last_update_check", 0);
+        if (System.currentTimeMillis() - lastCheck < UPDATE_CHECK_MIN_INTERVAL_MS) return;
+        prefs.edit().putLong("last_update_check", System.currentTimeMillis()).apply();
+
         new Thread(() -> {
             try {
                 Uri homeUri = Uri.parse(homeUrl);
