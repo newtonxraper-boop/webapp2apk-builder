@@ -4,6 +4,6 @@
         <item name="colorPrimary">{{PRIMARY_COLOR}}</item>
         <item name="colorPrimaryDark">{{PRIMARY_DARK_COLOR}}</item>
         <item name="colorAccent">{{ACCENT_COLOR}}</item>
+        <item name="android:colorEdgeEffect">{{ACCENT_COLOR}}</item>
     </style>
 </resources>
-

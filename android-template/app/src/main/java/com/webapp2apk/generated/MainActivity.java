@@ -110,6 +110,7 @@ public class MainActivity extends AppCompatActivity {
     // active tab changes, without rebuilding the whole bar.
     private final List<LinearLayout> tabContainers = new ArrayList<>();
     private final List<String> tabUrls = new ArrayList<>();
+    private final List<GradientDrawable> tabBadgeGlow = new ArrayList<>();
     private String currentActiveUrl;
 
     // --- Offline page cache -------------------------------------------------
@@ -124,6 +125,13 @@ public class MainActivity extends AppCompatActivity {
     private long maxCacheBytes = 25L * 1024 * 1024; // sensible default until computed from real free space
     private android.animation.ObjectAnimator progressPulseAnimator;
     private File offlineCacheDir;
+
+    private android.content.SharedPreferences prefs;
+    private JSONArray cachedNavItems;
+    private volatile boolean isCurrentlyOnline = true;
+    private int cacheWriteCountSinceLastScan = 0;
+    private boolean connectivityCallbackRegistered = false;
+    private boolean shortcutsRegistered = false;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -155,6 +163,7 @@ public class MainActivity extends AppCompatActivity {
         offlineCacheDir = new File(getFilesDir(), "webcache");
         if (!offlineCacheDir.exists()) offlineCacheDir.mkdirs();
         maxCacheBytes = computeCacheSizeLimit();
+        prefs = getSharedPreferences("webapp2apk_prefs", MODE_PRIVATE);
 
         setupActivityResultLaunchers();
         setupWebView();
@@ -163,16 +172,24 @@ public class MainActivity extends AppCompatActivity {
         setupConnectivityBanner();
         setupSwipeRefresh();
         setupBottomTabs();
-        setupHomeScreenShortcuts();
         checkForAppUpdate();
 
         webView.loadUrl(startUrl);
     }
 
     @Override
+    protected void onPause() {
+        super.onPause();
+        // Final safety net so a session cookie set right before the user
+        // backgrounds or closes the app is durably saved, not just held in
+        // memory waiting for the system's own periodic flush.
+        CookieManager.getInstance().flush();
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (networkCallback != null) {
+        if (networkCallback != null && connectivityCallbackRegistered) {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
             if (cm != null) {
                 try {
@@ -180,6 +197,7 @@ public class MainActivity extends AppCompatActivity {
                 } catch (Exception ignored) {
                 }
             }
+            connectivityCallbackRegistered = false;
         }
     }
 
@@ -272,6 +290,25 @@ public class MainActivity extends AppCompatActivity {
             webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true);
         }
 
+        // Pre-rasters content just outside the visible viewport for smoother
+        // scrolling, at the cost of a little extra memory - a good trade for
+        // a foreground app.
+        settings.setOffscreenPreRaster(true);
+
+        // Hardware-accelerate the WebView explicitly rather than relying on
+        // whatever layer type the platform defaults to.
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+
+        // Makes sure a logged-in session actually survives closing and
+        // reopening the app, instead of asking the user to sign in every
+        // time. Cookies persist to disk by default, but are only flushed to
+        // disk periodically by the system - explicit flushes (below, and in
+        // onPause()) make sure a freshly-established login session is saved
+        // promptly rather than risking loss if the app process gets killed.
+        CookieManager cookieManager = CookieManager.getInstance();
+        cookieManager.setAcceptCookie(true);
+        cookieManager.setAcceptThirdPartyCookies(webView, true);
+
         swipeRefresh.setColorSchemeColors(ContextCompat.getColor(this, R.color.accent_color));
 
         webView.setWebViewClient(new WebViewClient() {
@@ -319,6 +356,14 @@ public class MainActivity extends AppCompatActivity {
                 startProgressPulse();
                 view.animate().cancel();
                 view.setAlpha(0.3f);
+
+                // Deferred here (rather than during onCreate) so shortcut
+                // registration never competes with the WebView for CPU time
+                // while the critical first page is loading.
+                if (!shortcutsRegistered) {
+                    shortcutsRegistered = true;
+                    setupHomeScreenShortcuts();
+                }
             }
 
             @Override
@@ -347,6 +392,7 @@ public class MainActivity extends AppCompatActivity {
                 stopProgressPulse();
                 view.animate().alpha(1f).setDuration(250).start();
                 swipeRefresh.setRefreshing(false);
+                CookieManager.getInstance().flush();
                 if (cacheRetryInProgress) {
                     cacheRetryInProgress = false;
                     view.getSettings().setCacheMode(WebSettings.LOAD_DEFAULT);
@@ -421,8 +467,14 @@ public class MainActivity extends AppCompatActivity {
         }
 
         String cacheKey = sha256(uri.toString());
-        File bodyFile = new File(offlineCacheDir, cacheKey + ".body");
+        File bodyFile = new File(offlineCacheDir, cacheKey + ".body.gz");
         File metaFile = new File(offlineCacheDir, cacheKey + ".meta");
+
+        // Already know there's no connection - skip straight to the cached
+        // copy instead of waiting out a network attempt that's certain to fail.
+        if (!isCurrentlyOnline) {
+            return serveFromCacheFile(bodyFile, metaFile, uri);
+        }
 
         try {
             HttpURLConnection conn = (HttpURLConnection) new URL(uri.toString()).openConnection();
@@ -461,9 +513,9 @@ public class MainActivity extends AppCompatActivity {
                 byte[] data = readAllBytes(conn.getInputStream());
                 conn.disconnect();
 
-                writeFileQuietly(bodyFile, data);
+                writeGzipFileQuietly(bodyFile, data);
                 writeFileQuietly(metaFile, (mimeType + "|" + encoding).getBytes("UTF-8"));
-                enforceCacheSizeLimit();
+                maybeEnforceCacheSizeLimit();
 
                 return new WebResourceResponse(mimeType, encoding, new ByteArrayInputStream(data));
             } else {
@@ -473,13 +525,18 @@ public class MainActivity extends AppCompatActivity {
             // fall through to the cached copy below
         }
 
+        return serveFromCacheFile(bodyFile, metaFile, uri);
+    }
+
+    private WebResourceResponse serveFromCacheFile(File bodyFile, File metaFile, Uri uri) {
         if (bodyFile.exists() && metaFile.exists()) {
             try {
                 String meta = new String(readAllBytes(new FileInputStream(metaFile)), "UTF-8");
                 String[] parts = meta.split("\\|", 2);
                 String mimeType = parts.length > 0 ? parts[0] : "text/html";
                 String encoding = parts.length > 1 ? parts[1] : "UTF-8";
-                return new WebResourceResponse(mimeType, encoding, new FileInputStream(bodyFile));
+                byte[] data = readGzipFile(bodyFile);
+                return new WebResourceResponse(mimeType, encoding, new ByteArrayInputStream(data));
             } catch (Exception ignored) {
                 lastConfirmedCacheMissUrl = uri.toString();
                 return null;
@@ -506,16 +563,47 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * Cached pages are stored gzip-compressed on disk (HTML/JSON/text
+     * typically shrinks 60-80%), so the same storage budget holds noticeably
+     * more pages and each read is a smaller disk operation.
+     */
+    private static void writeGzipFileQuietly(File file, byte[] data) {
+        try (FileOutputStream fos = new FileOutputStream(file);
+             java.util.zip.GZIPOutputStream gzos = new java.util.zip.GZIPOutputStream(fos)) {
+            gzos.write(data);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static byte[] readGzipFile(File file) throws java.io.IOException {
+        try (FileInputStream fis = new FileInputStream(file);
+             java.util.zip.GZIPInputStream gzis = new java.util.zip.GZIPInputStream(fis)) {
+            return readAllBytes(gzis);
+        }
+    }
+
     private static String sha256(String input) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] hash = digest.digest(input.getBytes("UTF-8"));
-            StringBuilder sb = new StringBuilder();
+            StringBuilder sb = new StringBuilder(hash.length * 2);
             for (byte b : hash) sb.append(String.format("%02x", b));
             return sb.toString();
         } catch (Exception e) {
             return String.valueOf(input.hashCode());
         }
+    }
+
+    /**
+     * Scanning the whole cache directory on every single write is wasteful -
+     * only actually check/enforce the size limit every 5th write.
+     */
+    private void maybeEnforceCacheSizeLimit() {
+        cacheWriteCountSinceLastScan++;
+        if (cacheWriteCountSinceLastScan < 5) return;
+        cacheWriteCountSinceLastScan = 0;
+        enforceCacheSizeLimit();
     }
 
     private void enforceCacheSizeLimit() {
@@ -694,7 +782,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void restoreShareButtonPosition() {
-        android.content.SharedPreferences prefs = getSharedPreferences("webapp2apk_prefs", MODE_PRIVATE);
         if (!prefs.contains("share_btn_x")) return; // keep the default XML corner position
 
         shareButton.post(() -> {
@@ -706,8 +793,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void saveShareButtonPosition(float x, float y) {
-        getSharedPreferences("webapp2apk_prefs", MODE_PRIVATE)
-                .edit()
+        prefs.edit()
                 .putFloat("share_btn_x", x)
                 .putFloat("share_btn_y", y)
                 .apply();
@@ -830,7 +916,8 @@ public class MainActivity extends AppCompatActivity {
         ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         if (cm == null) return;
 
-        updateOfflineBanner(isOnline(cm));
+        isCurrentlyOnline = isOnline(cm);
+        updateOfflineBanner(isCurrentlyOnline);
 
         NetworkRequest request = new NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -839,19 +926,28 @@ public class MainActivity extends AppCompatActivity {
         networkCallback = new ConnectivityManager.NetworkCallback() {
             @Override
             public void onAvailable(Network network) {
-                runOnUiThread(() -> updateOfflineBanner(true));
+                boolean wasOffline = !isCurrentlyOnline;
+                isCurrentlyOnline = true;
+                runOnUiThread(() -> {
+                    updateOfflineBanner(true);
+                    if (wasOffline) showSnackbar("Back online");
+                });
             }
 
             @Override
             public void onLost(Network network) {
-                runOnUiThread(() -> updateOfflineBanner(isOnline(cm)));
+                isCurrentlyOnline = isOnline(cm);
+                runOnUiThread(() -> updateOfflineBanner(isCurrentlyOnline));
             }
         };
 
-        try {
-            cm.registerNetworkCallback(request, networkCallback);
-        } catch (Exception ignored) {
-            networkCallback = null;
+        if (!connectivityCallbackRegistered) {
+            try {
+                cm.registerNetworkCallback(request, networkCallback);
+                connectivityCallbackRegistered = true;
+            } catch (Exception ignored) {
+                networkCallback = null;
+            }
         }
     }
 
@@ -902,6 +998,7 @@ public class MainActivity extends AppCompatActivity {
         bottomTabBar.removeAllViews();
         tabContainers.clear();
         tabUrls.clear();
+        tabBadgeGlow.clear();
 
         for (int i = 0; i < navItems.length(); i++) {
             JSONObject item = navItems.optJSONObject(i);
@@ -923,6 +1020,7 @@ public class MainActivity extends AppCompatActivity {
             TextView iconView = new TextView(this);
             iconView.setGravity(Gravity.CENTER);
             boolean hasRealIcon = !icon.isEmpty() && !icon.equals("\u25CF");
+            GradientDrawable badgeGlow = null;
 
             if (hasRealIcon) {
                 iconView.setText(icon);
@@ -941,12 +1039,13 @@ public class MainActivity extends AppCompatActivity {
                 LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(dpToPx(22), dpToPx(22));
                 iconView.setLayoutParams(badgeParams);
 
-                GradientDrawable badgeBg = new GradientDrawable();
-                badgeBg.setShape(GradientDrawable.OVAL);
-                badgeBg.setColor(ContextCompat.getColor(this, R.color.accent_color));
-                badgeBg.setAlpha(50);
-                iconView.setBackground(badgeBg);
+                badgeGlow = new GradientDrawable();
+                badgeGlow.setShape(GradientDrawable.OVAL);
+                badgeGlow.setColor(ContextCompat.getColor(this, R.color.accent_color));
+                badgeGlow.setAlpha(50);
+                iconView.setBackground(badgeGlow);
             }
+            tabBadgeGlow.add(badgeGlow);
 
             TextView labelView = new TextView(this);
             labelView.setText(label);
@@ -959,6 +1058,12 @@ public class MainActivity extends AppCompatActivity {
             tabContainer.addView(labelView);
             tabContainer.setOnClickListener(v -> {
                 v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+                iconView.animate().cancel();
+                iconView.setScaleX(0.7f);
+                iconView.setScaleY(0.7f);
+                iconView.animate().scaleX(1f).scaleY(1f)
+                        .setInterpolator(new android.view.animation.OvershootInterpolator())
+                        .setDuration(280).start();
                 currentActiveUrl = url;
                 webView.loadUrl(url);
                 refreshTabHighlighting();
@@ -1009,19 +1114,31 @@ public class MainActivity extends AppCompatActivity {
                     ((TextView) child).setTextColor(color);
                 }
             }
+
+            if (i < tabBadgeGlow.size() && tabBadgeGlow.get(i) != null) {
+                GradientDrawable glow = tabBadgeGlow.get(i);
+                if (active) {
+                    glow.setStroke(dpToPx(2), activeColor);
+                } else {
+                    glow.setStroke(0, Color.TRANSPARENT);
+                }
+            }
         }
     }
 
     private JSONArray loadNavItems() {
+        if (cachedNavItems != null) return cachedNavItems;
+
         try (InputStream is = getAssets().open("nav_items.json")) {
             BufferedReader reader = new BufferedReader(new InputStreamReader(is));
             StringBuilder sb = new StringBuilder();
             String line;
             while ((line = reader.readLine()) != null) sb.append(line);
-            return new JSONArray(sb.toString());
+            cachedNavItems = new JSONArray(sb.toString());
         } catch (Exception e) {
-            return new JSONArray();
+            cachedNavItems = new JSONArray();
         }
+        return cachedNavItems;
     }
 
     @Override

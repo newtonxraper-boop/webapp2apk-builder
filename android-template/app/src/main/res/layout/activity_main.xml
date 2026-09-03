@@ -8,25 +8,29 @@
         android:id="@+id/offlineBanner"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="#C62828"
+        android:layout_margin="8dp"
+        android:background="@drawable/banner_bg_offline"
         android:text="No internet connection"
         android:textColor="#FFFFFF"
         android:textSize="12sp"
         android:gravity="center"
-        android:padding="6dp"
+        android:padding="10dp"
+        android:elevation="4dp"
         android:visibility="gone" />
 
     <TextView
         android:id="@+id/updateBanner"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@color/accent_color"
+        android:layout_margin="8dp"
+        android:background="@drawable/banner_bg_update"
         android:text="A new version is available - tap to update"
         android:textColor="#04150A"
         android:textStyle="bold"
         android:textSize="12sp"
         android:gravity="center"
-        android:padding="6dp"
+        android:padding="10dp"
+        android:elevation="4dp"
         android:visibility="gone" />
 
     <FrameLayout
@@ -79,6 +83,12 @@
         android:background="@drawable/bottom_nav_bg"
         android:elevation="8dp"
         android:visibility="gone">
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_gravity="top"
+            android:background="#33FFFFFF" />
 
         <View
             android:id="@+id/tabIndicator"

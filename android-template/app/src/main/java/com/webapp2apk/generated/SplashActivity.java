@@ -5,7 +5,10 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.view.View;
 import android.webkit.WebView;
+import android.widget.ImageView;
+import android.widget.TextView;
 import androidx.appcompat.app.AppCompatActivity;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -18,6 +21,11 @@ public class SplashActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_splash);
+
+        ImageView icon = findViewById(R.id.splashIcon);
+        TextView text = findViewById(R.id.splashText);
+        icon.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(400).setStartDelay(80).start();
+        text.animate().alpha(1f).setDuration(350).setStartDelay(280).start();
 
         // App.onCreate() runs before any Activity.onCreate(), so appConfig is
         // already populated here.
