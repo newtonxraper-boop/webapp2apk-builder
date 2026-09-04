@@ -11,15 +11,27 @@
   }
   h2{margin:16px 0 8px; color:{{ACCENT_COLOR}};}
   p{color:#9aa0a6; font-size:14px; margin:0;}
-  .icon{font-size:48px;}
+  .illustration{width:96px; height:96px;}
   .retry{
-    margin-top:20px; padding:10px 20px; border-radius:999px; border:none;
+    margin-top:20px; padding:10px 22px; border-radius:999px; border:none;
     background:{{PRIMARY_COLOR}}; color:#04150a; font-weight:700; font-size:13px;
+    box-shadow:0 6px 16px rgba(0,0,0,0.35), 0 2px 4px rgba(0,0,0,0.25);
+  }
+  .retry:active{
+    box-shadow:0 2px 6px rgba(0,0,0,0.3);
+    transform:translateY(1px);
   }
 </style>
 </head>
 <body>
-  <div class="icon">📡</div>
+  <svg class="illustration" viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="48" cy="48" r="44" fill="{{PRIMARY_COLOR}}" opacity="0.15"/>
+    <path d="M24 40 Q48 16 72 40" stroke="{{ACCENT_COLOR}}" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.35"/>
+    <path d="M32 50 Q48 34 64 50" stroke="{{ACCENT_COLOR}}" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.6"/>
+    <path d="M40 60 Q48 52 56 60" stroke="{{ACCENT_COLOR}}" stroke-width="4" fill="none" stroke-linecap="round"/>
+    <circle cx="48" cy="70" r="4" fill="{{ACCENT_COLOR}}"/>
+    <line x1="20" y1="24" x2="76" y2="72" stroke="#e8eaed" stroke-width="4" stroke-linecap="round"/>
+  </svg>
   <h2>You're offline</h2>
   <p>Pull down to try again once you're back online.</p>
   <button class="retry" onclick="location.reload()">Try again</button>

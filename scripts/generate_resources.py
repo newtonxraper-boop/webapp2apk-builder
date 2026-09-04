@@ -46,6 +46,18 @@ ADAPTIVE_FOREGROUND_SIZES = {
     "mipmap-xxxhdpi": 432,
 }
 
+# Android explicitly requires notification/status-bar icons to be a flat white
+# silhouette on transparent background - a full-color launcher icon there
+# renders as a blurry/wrong-looking blob on many phones (or triggers a lint
+# warning of its own). These are much smaller than launcher icons.
+NOTIFICATION_ICON_SIZES = {
+    "drawable-mdpi": 24,
+    "drawable-hdpi": 36,
+    "drawable-xhdpi": 48,
+    "drawable-xxhdpi": 72,
+    "drawable-xxxhdpi": 96,
+}
+
 
 def sanitize_segment(text: str) -> str:
     """Make a single package-name segment a valid Java identifier."""
@@ -178,7 +190,18 @@ def process_icon(icon_url: str) -> bool:
         canvas.paste(fg_resized, (offset, offset), fg_resized)
         canvas.save(os.path.join(dest_dir, "ic_launcher_foreground.png"), optimize=True)
 
-    print("Custom app icon applied (legacy + adaptive foreground, all densities).")
+    for folder, size in NOTIFICATION_ICON_SIZES.items():
+        dest_dir = os.path.join(TEMPLATE_ROOT, "app", "src", "main", "res", folder)
+        os.makedirs(dest_dir, exist_ok=True)
+
+        resized = src.resize((size, size), Image.LANCZOS)
+        alpha = resized.split()[-1]
+        white_layer = Image.new("RGBA", (size, size), (255, 255, 255, 255))
+        silhouette = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        silhouette.paste(white_layer, (0, 0), mask=alpha)
+        silhouette.save(os.path.join(dest_dir, "ic_stat_notify.png"), optimize=True)
+
+    print("Custom app icon applied (legacy + adaptive foreground + notification silhouette, all densities).")
     return True
 
 

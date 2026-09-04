@@ -5,6 +5,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.os.Build;
 import androidx.core.app.NotificationCompat;
 import com.google.firebase.messaging.FirebaseMessagingService;
@@ -49,11 +50,20 @@ public class MyFirebaseMessagingService extends FirebaseMessagingService {
                 | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
         PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent, flags);
 
+        // Best-effort unread counter for a numeric launcher badge - support for
+        // an actual NUMBER (rather than just a dot) varies by launcher/OEM and
+        // isn't something any single API guarantees across all phones, but
+        // NotificationCompat.setNumber() is respected by several of them.
+        SharedPreferences prefs = getSharedPreferences("webapp2apk_prefs", MODE_PRIVATE);
+        int unreadCount = prefs.getInt("unread_notification_count", 0) + 1;
+        prefs.edit().putInt("unread_notification_count", unreadCount).apply();
+
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setSmallIcon(R.mipmap.ic_launcher)
+                .setSmallIcon(R.drawable.ic_stat_notify)
                 .setContentTitle(title)
                 .setContentText(body)
                 .setAutoCancel(true)
+                .setNumber(unreadCount)
                 .setContentIntent(pendingIntent);
 
         manager.notify((int) System.currentTimeMillis(), builder.build());

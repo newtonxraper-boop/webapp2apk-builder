@@ -78,6 +78,7 @@ public class MainActivity extends AppCompatActivity {
     private LinearLayout bottomTabBar;
     private View bottomTabBarContainer;
     private View tabIndicator;
+    private View tabNotch;
     private TextView offlineBanner;
     private TextView updateBanner;
     private View shareButton;
@@ -162,6 +163,7 @@ public class MainActivity extends AppCompatActivity {
         bottomTabBar = findViewById(R.id.bottomTabBar);
         bottomTabBarContainer = findViewById(R.id.bottomTabBarContainer);
         tabIndicator = findViewById(R.id.tabIndicator);
+        tabNotch = findViewById(R.id.tabNotch);
         offlineBanner = findViewById(R.id.offlineBanner);
         updateBanner = findViewById(R.id.updateBanner);
         shareButton = findViewById(R.id.shareButton);
@@ -212,6 +214,7 @@ public class MainActivity extends AppCompatActivity {
         super.onResume();
         webView.onResume();
         webView.resumeTimers();
+        if (prefs != null) prefs.edit().putInt("unread_notification_count", 0).apply();
     }
 
     @Override
@@ -1245,10 +1248,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void applyRippleForeground(View view) {
-        TypedValue outValue = new TypedValue();
-        getTheme().resolveAttribute(android.R.attr.selectableItemBackground, outValue, true);
-        if (outValue.resourceId != 0) {
-            view.setForeground(ContextCompat.getDrawable(this, outValue.resourceId));
+        try {
+            view.setForeground(ContextCompat.getDrawable(this, R.drawable.nav_ripple));
+        } catch (Exception e) {
+            TypedValue outValue = new TypedValue();
+            getTheme().resolveAttribute(android.R.attr.selectableItemBackground, outValue, true);
+            if (outValue.resourceId != 0) {
+                view.setForeground(ContextCompat.getDrawable(this, outValue.resourceId));
+            }
         }
     }
 
@@ -1347,7 +1354,8 @@ public class MainActivity extends AppCompatActivity {
     /**
      * Slides the thin accent-colored strip along the top of the bottom nav
      * bar to sit under whichever tab is currently active, instead of just
-     * swapping icon/label colors with no motion.
+     * swapping icon/label colors with no motion. Also floats a soft circular
+     * highlight up behind the active tab's icon.
      */
     private void moveIndicatorToActiveTab() {
         if (tabIndicator == null || tabUrls.isEmpty()) return;
@@ -1362,6 +1370,11 @@ public class MainActivity extends AppCompatActivity {
             params.width = tabWidth;
             tabIndicator.setLayoutParams(params);
             tabIndicator.animate().x(tabWidth * idx).setDuration(200).start();
+
+            if (tabNotch != null) {
+                float notchX = tabWidth * idx + (tabWidth - tabNotch.getWidth()) / 2f;
+                tabNotch.animate().x(notchX).alpha(0.18f).setDuration(200).start();
+            }
         });
     }
 
