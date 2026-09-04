@@ -821,9 +821,15 @@ public class MainActivity extends AppCompatActivity {
      * a copy of that same URL again in the background purely to populate the
      * offline cache for later - completely separate from, and after, what the
      * user is currently looking at, so it can never affect the live page.
+     *
+     * Deliberately NOT gated behind shouldDoBackgroundWork() (unlike
+     * prefetchNavTabs) - this is the core offline-caching mechanism, and
+     * skipping it on cellular would mean offline access barely works at all
+     * for anyone who isn't usually on WiFi. It costs roughly the same data as
+     * the page the user already just loaded, not "extra" pages they may
+     * never visit.
      */
     private void cachePageInBackground(String urlString) {
-        if (!shouldDoBackgroundWork()) return;
         try {
             Uri uri = Uri.parse(urlString);
             String scheme = uri.getScheme();
