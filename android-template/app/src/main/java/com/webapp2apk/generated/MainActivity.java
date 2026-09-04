@@ -143,6 +143,12 @@ public class MainActivity extends AppCompatActivity {
 
     private static final long UPDATE_CHECK_MIN_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
+    private float cachedDensity = 0f;
+    private static final int MAX_CACHE_FILE_COUNT = 500;
+    private long lastDragUpdateTime = 0;
+    private static final long DRAG_UPDATE_THROTTLE_MS = 16; // ~60fps
+    private java.util.concurrent.ExecutorService prefetchExecutor;
+
     @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -220,6 +226,25 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
             connectivityCallbackRegistered = false;
+        }
+
+        if (progressPulseAnimator != null) {
+            progressPulseAnimator.cancel();
+            progressPulseAnimator = null;
+        }
+        if (pendingBannerUpdate != null) {
+            bannerDebounceHandler.removeCallbacksAndMessages(null);
+            pendingBannerUpdate = null;
+        }
+        if (webView != null) {
+            webView.animate().cancel();
+        }
+        if (shareButton != null) {
+            shareButton.animate().cancel();
+        }
+        if (prefetchExecutor != null) {
+            prefetchExecutor.shutdownNow();
+            prefetchExecutor = null;
         }
     }
 
@@ -410,15 +435,39 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                progressBar.setVisibility(View.GONE);
-                stopProgressPulse();
-                view.animate().alpha(1f).setDuration(250).start();
                 swipeRefresh.setRefreshing(false);
                 maybeFlushCookies();
+
+                // postVisualStateCallback fires once the page is actually
+                // painted on screen, which can be a moment after
+                // onPageFinished (DOM-complete) fires - hiding the spinner
+                // here instead avoids revealing a still-blank frame. A
+                // fallback timeout guards against the callback never firing
+                // on some WebView versions, so the spinner can't get stuck.
+                final long visualStateRequestId = System.currentTimeMillis();
+                final boolean[] revealed = {false};
+                Runnable reveal = () -> {
+                    if (revealed[0]) return;
+                    revealed[0] = true;
+                    progressBar.setVisibility(View.GONE);
+                    stopProgressPulse();
+                    view.animate().alpha(1f).setDuration(250).start();
+                };
+                view.postVisualStateCallback(visualStateRequestId, new WebView.VisualStateCallback() {
+                    @Override
+                    public void onComplete(long requestId) {
+                        reveal.run();
+                    }
+                });
+                view.postDelayed(reveal, 1200);
 
                 if (!homePrefetchTriggered && homeUrl.equals(url)) {
                     homePrefetchTriggered = true;
                     prefetchNavTabs();
+                }
+
+                if (isCurrentlyOnline && url != null) {
+                    cachePageInBackground(url);
                 }
 
                 if (cacheRetryInProgress) {
@@ -500,17 +549,21 @@ public class MainActivity extends AppCompatActivity {
             return null;
         }
 
-        String cacheKey = sha256(uri.toString());
-        File bodyFile = new File(offlineCacheDir, cacheKey + ".body.gz");
-        File metaFile = new File(offlineCacheDir, cacheKey + ".meta");
-
-        // Already know there's no connection - skip straight to the cached
-        // copy instead of waiting out a network attempt that's certain to fail.
+        // Only take over the request when genuinely offline. When online,
+        // this returns null and WebView's own native networking handles the
+        // request completely normally - identical to a real browser, with
+        // zero risk of interfering with cookies or session state. The page
+        // still gets cached for offline use afterward, just passively in the
+        // background (see onPageFinished) rather than by hijacking the live
+        // request itself.
         if (!isCurrentlyOnline) {
+            String cacheKey = sha256(uri.toString());
+            File bodyFile = new File(offlineCacheDir, cacheKey + ".body.gz");
+            File metaFile = new File(offlineCacheDir, cacheKey + ".meta");
             return serveFromCacheFile(bodyFile, metaFile, uri);
         }
 
-        return fetchAndCache(uri, bodyFile, metaFile);
+        return null;
     }
 
     private static final String[] SENSITIVE_URL_KEYWORDS = {
@@ -543,6 +596,8 @@ public class MainActivity extends AppCompatActivity {
             conn.setReadTimeout(8000);
             conn.setInstanceFollowRedirects(true);
             conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android; WebApp2Apk offline cache)");
+            conn.setRequestProperty("Accept-Encoding", "gzip");
+            conn.setRequestProperty("Connection", "keep-alive");
 
             CookieManager cookieManager = CookieManager.getInstance();
             String cookie = cookieManager.getCookie(uri.toString());
@@ -590,7 +645,11 @@ public class MainActivity extends AppCompatActivity {
                 String etag = conn.getHeaderField("ETag");
                 String lastModified = conn.getHeaderField("Last-Modified");
 
-                byte[] data = readAllBytes(conn.getInputStream());
+                boolean serverGzipped = "gzip".equalsIgnoreCase(conn.getContentEncoding());
+                InputStream responseStream = conn.getInputStream();
+                if (serverGzipped) responseStream = new java.util.zip.GZIPInputStream(responseStream);
+
+                byte[] data = readAllBytes(responseStream);
                 conn.disconnect();
 
                 writeGzipFileQuietly(bodyFile, data);
@@ -703,12 +762,19 @@ public class MainActivity extends AppCompatActivity {
         if (files == null) return;
         long total = 0;
         for (File f : files) total += f.length();
-        if (total <= maxCacheBytes) return;
+
+        boolean overSize = total > maxCacheBytes;
+        boolean overCount = files.length > MAX_CACHE_FILE_COUNT;
+        if (!overSize && !overCount) return;
 
         Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+        int remaining = files.length;
         for (File f : files) {
-            if (total <= maxCacheBytes) break;
+            boolean stillOverSize = total > maxCacheBytes;
+            boolean stillOverCount = remaining > MAX_CACHE_FILE_COUNT;
+            if (!stillOverSize && !stillOverCount) break;
             total -= f.length();
+            remaining--;
             f.delete();
         }
     }
@@ -730,7 +796,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setupSwipeRefresh() {
-        swipeRefresh.setOnRefreshListener(() -> webView.loadUrl(homeUrl));
+        swipeRefresh.setOnRefreshListener(() -> webView.reload());
     }
 
     /**
@@ -747,20 +813,73 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
+     * Called after a page has already loaded natively (successfully, with
+     * correct cookies/session handling since WebView did it itself). Fetches
+     * a copy of that same URL again in the background purely to populate the
+     * offline cache for later - completely separate from, and after, what the
+     * user is currently looking at, so it can never affect the live page.
+     */
+    private void cachePageInBackground(String urlString) {
+        if (!shouldDoBackgroundWork()) return;
+        try {
+            Uri uri = Uri.parse(urlString);
+            String scheme = uri.getScheme();
+            if (scheme == null || !(scheme.equals("http") || scheme.equals("https"))) return;
+
+            Uri homeUri = Uri.parse(homeUrl);
+            if (homeUri.getHost() == null || !homeUri.getHost().equalsIgnoreCase(uri.getHost())) return;
+            if (isSensitiveUrl(uri)) return;
+
+            new Thread(() -> {
+                String cacheKey = sha256(uri.toString());
+                File bodyFile = new File(offlineCacheDir, cacheKey + ".body.gz");
+                File metaFile = new File(offlineCacheDir, cacheKey + ".meta");
+                fetchAndCache(uri, bodyFile, metaFile);
+            }).start();
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Background caching/prefetch only runs on an unmetered (WiFi) connection
+     * and when the phone isn't in battery saver mode - it's a nice-to-have,
+     * not worth spending someone's mobile data allowance or battery on.
+     */
+    private boolean shouldDoBackgroundWork() {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        if (cm == null) return false;
+        Network network = cm.getActiveNetwork();
+        if (network == null) return false;
+        NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+        boolean unmetered = caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+        if (!unmetered) return false;
+
+        android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+        boolean batterySaver = pm != null && pm.isPowerSaveMode();
+        return !batterySaver;
+    }
+
+    /**
      * Once the home page has loaded, quietly warms the offline cache for the
-     * other bottom-nav tabs in the background, so switching to them feels
-     * instant instead of triggering a fresh load the first time each is tapped.
+     * other bottom-nav tabs in the background (on WiFi only, battery saver
+     * permitting), so switching to them feels instant instead of triggering
+     * a fresh load the first time each is tapped. Runs on a small thread
+     * pool so multiple tabs warm up concurrently rather than one at a time.
      */
     private void prefetchNavTabs() {
-        if (tabUrls.isEmpty()) return;
+        if (tabUrls.isEmpty() || !shouldDoBackgroundWork()) return;
         final List<String> urlsToPrefetch = new ArrayList<>(tabUrls);
 
-        new Thread(() -> {
-            for (String tabUrl : urlsToPrefetch) {
-                if (tabUrl.equals(homeUrl)) continue;
+        if (prefetchExecutor == null || prefetchExecutor.isShutdown()) {
+            prefetchExecutor = java.util.concurrent.Executors.newFixedThreadPool(2);
+        }
+
+        for (String tabUrl : urlsToPrefetch) {
+            if (tabUrl.equals(homeUrl)) continue;
+            prefetchExecutor.submit(() -> {
                 try {
                     Uri uri = Uri.parse(tabUrl);
-                    if (isSensitiveUrl(uri)) continue;
+                    if (isSensitiveUrl(uri)) return;
                     String cacheKey = sha256(uri.toString());
                     File bodyFile = new File(offlineCacheDir, cacheKey + ".body.gz");
                     File metaFile = new File(offlineCacheDir, cacheKey + ".meta");
@@ -768,8 +887,8 @@ public class MainActivity extends AppCompatActivity {
                 } catch (Exception ignored) {
                     // A prefetch failing for one tab shouldn't affect the others.
                 }
-            }
-        }).start();
+            });
+        }
     }
 
     /**
@@ -891,6 +1010,13 @@ public class MainActivity extends AppCompatActivity {
                     return true;
 
                 case MotionEvent.ACTION_MOVE: {
+                    float moved = Math.abs(event.getRawX() - downRawX[0]) + Math.abs(event.getRawY() - downRawY[0]);
+                    if (moved > dpToPx(8)) isDragging[0] = true;
+
+                    long now = System.currentTimeMillis();
+                    if (now - lastDragUpdateTime < DRAG_UPDATE_THROTTLE_MS) return true;
+                    lastDragUpdateTime = now;
+
                     View parent = (View) v.getParent();
                     float newX = event.getRawX() + touchOffsetX[0];
                     float newY = event.getRawY() + touchOffsetY[0];
@@ -898,9 +1024,6 @@ public class MainActivity extends AppCompatActivity {
                     newY = Math.max(0, Math.min(newY, parent.getHeight() - v.getHeight()));
                     v.setX(newX);
                     v.setY(newY);
-
-                    float moved = Math.abs(event.getRawX() - downRawX[0]) + Math.abs(event.getRawY() - downRawY[0]);
-                    if (moved > dpToPx(8)) isDragging[0] = true;
                     return true;
                 }
 
@@ -1117,8 +1240,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private int dpToPx(int dp) {
-        float density = getResources().getDisplayMetrics().density;
-        return Math.round(dp * density);
+        if (cachedDensity == 0f) cachedDensity = getResources().getDisplayMetrics().density;
+        return Math.round(dp * cachedDensity);
     }
 
     private void applyRippleForeground(View view) {
