@@ -63,6 +63,15 @@
             android:indeterminateTint="@color/accent_color"
             android:visibility="gone" />
 
+        <ImageView
+            android:id="@+id/progressBarIcon"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:layout_gravity="center"
+            android:src="@mipmap/ic_launcher"
+            android:contentDescription="@null"
+            android:visibility="gone" />
+
         <TextView
             android:id="@+id/shareButton"
             android:layout_width="52dp"

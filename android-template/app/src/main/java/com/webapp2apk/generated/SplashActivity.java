@@ -21,6 +21,7 @@ public class SplashActivity extends AppCompatActivity {
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private boolean navigated = false;
+    private android.animation.AnimatorSet dotsAnimator;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -31,6 +32,7 @@ public class SplashActivity extends AppCompatActivity {
         TextView text = findViewById(R.id.splashText);
         icon.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(400).setStartDelay(80).start();
         text.animate().alpha(1f).setDuration(350).setStartDelay(280).start();
+        startDotsAnimation();
 
         // App.onCreate() runs before any Activity.onCreate(), so appConfig is
         // already populated here.
@@ -64,9 +66,35 @@ public class SplashActivity extends AppCompatActivity {
     private void navigateToMain() {
         if (navigated) return;
         navigated = true;
+        if (dotsAnimator != null) dotsAnimator.cancel();
         startActivity(new Intent(SplashActivity.this, MainActivity.class));
         finish();
         overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out);
+    }
+
+    /**
+     * A subtle staggered pulse on the three dots below the app name, so the
+     * connection-check wait feels active rather than static.
+     */
+    private void startDotsAnimation() {
+        View dot1 = findViewById(R.id.dot1);
+        View dot2 = findViewById(R.id.dot2);
+        View dot3 = findViewById(R.id.dot3);
+
+        java.util.List<android.animation.Animator> pulses = new java.util.ArrayList<>();
+        View[] dots = {dot1, dot2, dot3};
+        for (int i = 0; i < dots.length; i++) {
+            android.animation.ObjectAnimator pulse = android.animation.ObjectAnimator.ofFloat(
+                    dots[i], "alpha", 0.3f, 1f, 0.3f);
+            pulse.setDuration(900);
+            pulse.setStartDelay(i * 150L);
+            pulse.setRepeatCount(android.animation.ObjectAnimator.INFINITE);
+            pulses.add(pulse);
+        }
+
+        dotsAnimator = new android.animation.AnimatorSet();
+        dotsAnimator.playTogether(pulses);
+        dotsAnimator.start();
     }
 
     /**

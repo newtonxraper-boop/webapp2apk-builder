@@ -75,6 +75,7 @@ public class MainActivity extends AppCompatActivity {
     private WebView webView;
     private SwipeRefreshLayout swipeRefresh;
     private ProgressBar progressBar;
+    private View progressBarIcon;
     private LinearLayout bottomTabBar;
     private View bottomTabBarContainer;
     private View tabIndicator;
@@ -160,6 +161,7 @@ public class MainActivity extends AppCompatActivity {
         webView = findViewById(R.id.webview);
         swipeRefresh = findViewById(R.id.swipeRefresh);
         progressBar = findViewById(R.id.progressBar);
+        progressBarIcon = findViewById(R.id.progressBarIcon);
         bottomTabBar = findViewById(R.id.bottomTabBar);
         bottomTabBarContainer = findViewById(R.id.bottomTabBarContainer);
         tabIndicator = findViewById(R.id.tabIndicator);
@@ -403,6 +405,7 @@ public class MainActivity extends AppCompatActivity {
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
                 progressBar.setVisibility(View.VISIBLE);
+                progressBarIcon.setVisibility(View.VISIBLE);
                 startProgressPulse();
                 view.animate().cancel();
                 view.setAlpha(0.3f);
@@ -424,13 +427,25 @@ public class MainActivity extends AppCompatActivity {
                 String failedUrl = request.getUrl().toString();
                 boolean alreadyConfirmedMissing = failedUrl.equals(lastConfirmedCacheMissUrl);
 
+                // A real network failure is a far more immediate signal than
+                // waiting for the system's connectivity callback, which can
+                // lag behind by a second or more. Marking offline right away
+                // means the very next attempt below correctly asks OUR
+                // offline cache for this page, instead of only ever trying
+                // WebView's own separate native cache (which is what used to
+                // require a full app restart to recover from - restarting
+                // synchronously re-checked real connectivity on cold start,
+                // this makes that same check happen immediately either way).
+                if (isCurrentlyOnline) {
+                    isCurrentlyOnline = false;
+                    updateOfflineBanner(false);
+                }
+
                 if (!cacheRetryInProgress && !alreadyConfirmedMissing) {
                     cacheRetryInProgress = true;
-                    view.getSettings().setCacheMode(WebSettings.LOAD_CACHE_ONLY);
                     view.loadUrl(failedUrl);
                 } else {
                     cacheRetryInProgress = false;
-                    view.getSettings().setCacheMode(WebSettings.LOAD_DEFAULT);
                     view.loadUrl("file:///android_asset/offline.html");
                 }
             }
@@ -453,6 +468,7 @@ public class MainActivity extends AppCompatActivity {
                     if (revealed[0]) return;
                     revealed[0] = true;
                     progressBar.setVisibility(View.GONE);
+                    progressBarIcon.setVisibility(View.GONE);
                     stopProgressPulse();
                     view.animate().alpha(1f).setDuration(250).start();
                 };
@@ -473,10 +489,7 @@ public class MainActivity extends AppCompatActivity {
                     cachePageInBackground(url);
                 }
 
-                if (cacheRetryInProgress) {
-                    cacheRetryInProgress = false;
-                    view.getSettings().setCacheMode(WebSettings.LOAD_DEFAULT);
-                }
+                cacheRetryInProgress = false;
             }
         });
 
@@ -800,6 +813,15 @@ public class MainActivity extends AppCompatActivity {
 
     private void setupSwipeRefresh() {
         swipeRefresh.setOnRefreshListener(() -> webView.reload());
+
+        // By default SwipeRefreshLayout decides whether a downward drag
+        // should start a refresh by asking whether the WebView can still
+        // scroll up - but WebView's own answer to that can be unreliable
+        // right after a page loads or on pages with sticky/fixed-position
+        // elements, causing a refresh to fire in the middle of normal
+        // scrolling. Checking the WebView's actual scroll position directly
+        // is the standard, more reliable fix.
+        swipeRefresh.setOnChildScrollUpCallback((parent, child) -> webView.getScrollY() > 0);
     }
 
     /**
@@ -1112,9 +1134,12 @@ public class MainActivity extends AppCompatActivity {
                 shortcutIntent.putExtra("shortcut_url", url);
                 shortcutIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
 
+                String letter = label.isEmpty() ? "?" : label.substring(0, 1).toUpperCase();
+                IconCompat icon = createShortcutIcon(letter, getShortcutColor(i));
+
                 ShortcutInfoCompat shortcut = new ShortcutInfoCompat.Builder(this, "tab_" + i)
                         .setShortLabel(label)
-                        .setIcon(IconCompat.createWithResource(this, R.mipmap.ic_launcher))
+                        .setIcon(icon)
                         .setIntent(shortcutIntent)
                         .build();
                 shortcuts.add(shortcut);
@@ -1126,6 +1151,40 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception ignored) {
             // Shortcuts are a nice-to-have - never let a failure here affect the app itself.
         }
+    }
+
+    /**
+     * A different hue per shortcut (same saturation/brightness as the app's
+     * own accent color, just rotated) so the shortcuts are distinguishable
+     * from one another at a glance, while still feeling on-brand rather than
+     * like random unrelated colors.
+     */
+    private int getShortcutColor(int index) {
+        int baseColor = ContextCompat.getColor(this, R.color.accent_color);
+        float[] hsv = new float[3];
+        Color.colorToHSV(baseColor, hsv);
+        hsv[0] = (hsv[0] + index * 55f) % 360f;
+        return Color.HSVToColor(hsv);
+    }
+
+    private IconCompat createShortcutIcon(String letter, int color) {
+        int size = 108;
+        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(
+                size, size, android.graphics.Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas canvas = new android.graphics.Canvas(bitmap);
+        canvas.drawColor(color);
+
+        android.graphics.Paint textPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        textPaint.setColor(Color.WHITE);
+        textPaint.setTextSize(size * 0.5f);
+        textPaint.setTextAlign(android.graphics.Paint.Align.CENTER);
+        textPaint.setFakeBoldText(true);
+
+        android.graphics.Paint.FontMetrics fm = textPaint.getFontMetrics();
+        float textY = size / 2f - (fm.ascent + fm.descent) / 2f;
+        canvas.drawText(letter, size / 2f, textY, textPaint);
+
+        return IconCompat.createWithAdaptiveBitmap(bitmap);
     }
 
     /**

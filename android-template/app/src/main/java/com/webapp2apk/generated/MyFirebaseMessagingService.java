@@ -6,8 +6,11 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.os.Build;
 import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 import com.google.firebase.messaging.FirebaseMessagingService;
 import com.google.firebase.messaging.RemoteMessage;
 
@@ -60,11 +63,18 @@ public class MyFirebaseMessagingService extends FirebaseMessagingService {
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_notify)
+                .setColor(ContextCompat.getColor(this, R.color.accent_color))
                 .setContentTitle(title)
                 .setContentText(body)
                 .setAutoCancel(true)
                 .setNumber(unreadCount)
                 .setContentIntent(pendingIntent);
+
+        try {
+            Bitmap largeIcon = BitmapFactory.decodeResource(getResources(), R.mipmap.ic_launcher);
+            if (largeIcon != null) builder.setLargeIcon(largeIcon);
+        } catch (Exception ignored) {
+        }
 
         manager.notify((int) System.currentTimeMillis(), builder.build());
     }
