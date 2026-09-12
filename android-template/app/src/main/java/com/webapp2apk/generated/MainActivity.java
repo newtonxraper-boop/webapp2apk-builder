@@ -514,18 +514,29 @@ public class MainActivity extends AppCompatActivity {
                 super.onReceivedError(view, request, error);
                 if (!request.isForMainFrame()) return;
 
+                // Ask real connectivity directly instead of assuming any
+                // onReceivedError means the network is down. WebView fires
+                // this for plenty of non-connectivity reasons too - most
+                // commonly ERR_CACHE_MISS when reloading a page that was
+                // originally reached via POST (exactly what a Save/Delete/
+                // Add button does), which was previously being misread as
+                // "offline", wrongly flipping the banner on and reloading a
+                // POST target as a plain GET - producing a page that visibly
+                // reloads but silently does nothing.
+                ConnectivityManager cmCheck = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+                boolean actuallyOffline = cmCheck == null || !isOnline(cmCheck);
+
+                if (!actuallyOffline) {
+                    // A real page/server error while genuinely online (a
+                    // benign WebView quirk, an HTTP 4xx/5xx, etc.) - leave it
+                    // to WebView's own default handling rather than treating
+                    // it as a connectivity problem.
+                    return;
+                }
+
                 String failedUrl = request.getUrl().toString();
                 boolean alreadyConfirmedMissing = failedUrl.equals(lastConfirmedCacheMissUrl);
 
-                // A real network failure is a far more immediate signal than
-                // waiting for the system's connectivity callback, which can
-                // lag behind by a second or more. Marking offline right away
-                // means the very next attempt below correctly asks OUR
-                // offline cache for this page, instead of only ever trying
-                // WebView's own separate native cache (which is what used to
-                // require a full app restart to recover from - restarting
-                // synchronously re-checked real connectivity on cold start,
-                // this makes that same check happen immediately either way).
                 if (isCurrentlyOnline) {
                     isCurrentlyOnline = false;
                     updateOfflineBanner(false);
