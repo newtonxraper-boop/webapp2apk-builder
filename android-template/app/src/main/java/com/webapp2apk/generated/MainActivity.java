@@ -84,10 +84,9 @@ public class MainActivity extends AppCompatActivity {
     private TextView updateBanner;
     private View shareButton;
     private View refreshButton;
-    private View syncPendingBanner;
-    private TextView syncPendingText;
-    private View syncPendingSendNowButton;
-    // (offline-queue file access is fully owned by OfflineQueueSync now)
+    private TextView syncPendingBanner;
+    private File offlineQueueFile;
+    private final Object queueLock = new Object();
 
     private String homeUrl;
     private boolean filecameraEnabled;
@@ -141,22 +140,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean shortcutsRegistered = false;
     private boolean homePrefetchTriggered = false;
 
-    // Offline-queue flush retry: Android's NetworkCallback can fire
-    // onAvailable before the connection is genuinely usable (DNS not ready,
-    // captive portal check pending), and even a "validated" network can
-    // still fail a real HTTP request once in a while. Rather than trying
-    // exactly once and giving up silently, we keep retrying on a short
-    // backoff for as long as items remain queued and we still believe we're
-    // online, and stop the moment the queue empties or the network drops.
-    private final android.os.Handler queueRetryHandler = new android.os.Handler(android.os.Looper.getMainLooper());
-    private Runnable pendingQueueRetry;
-    private int flushRetryAttempt = 0;
-    private static final long[] FLUSH_RETRY_DELAYS_MS = {5_000L, 15_000L, 30_000L, 60_000L};
-
     private long lastCookieFlushTime = 0;
-    private String lastPageUrl;
-    private String[] pendingCredentials;
-    private volatile boolean skipAutoLoginOnce = false;
     private static final long COOKIE_FLUSH_MIN_INTERVAL_MS = 2000;
 
     private String lastDownloadUrl;
@@ -191,14 +175,6 @@ public class MainActivity extends AppCompatActivity {
         shareButton = findViewById(R.id.shareButton);
         refreshButton = findViewById(R.id.refreshButton);
         syncPendingBanner = findViewById(R.id.syncPendingBanner);
-        syncPendingText = findViewById(R.id.syncPendingText);
-        syncPendingSendNowButton = findViewById(R.id.syncPendingSendNowButton);
-        if (syncPendingSendNowButton != null) {
-            syncPendingSendNowButton.setOnClickListener(v -> {
-                v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
-                forceSendQueueNow();
-            });
-        }
 
         JSONObject config = App.appConfig;
         homeUrl = config.optString("app_url", getString(R.string.app_url));
@@ -214,8 +190,7 @@ public class MainActivity extends AppCompatActivity {
         if (!offlineCacheDir.exists()) offlineCacheDir.mkdirs();
         maxCacheBytes = computeCacheSizeLimit();
         prefs = getSharedPreferences("webapp2apk_prefs", MODE_PRIVATE);
-        // Queue file lives under OfflineQueueSync now (shared with the
-        // background Worker) - nothing to initialize here.
+        offlineQueueFile = new File(getFilesDir(), "offline_queue.jsonl");
 
         setupActivityResultLaunchers();
         setupWebView();
@@ -243,10 +218,6 @@ public class MainActivity extends AppCompatActivity {
         // backgrounds or closes the app is durably saved, not just held in
         // memory waiting for the system's own periodic flush.
         CookieManager.getInstance().flush();
-        // If anything is still queued the moment the app goes to the
-        // background, make sure an OS-scheduled retry is in place - the
-        // in-app retry/Handler path stops the instant this process dies.
-        OfflineQueueWorker.scheduleIfNeeded(getApplicationContext());
     }
 
     @Override
@@ -255,28 +226,11 @@ public class MainActivity extends AppCompatActivity {
         webView.onResume();
         webView.resumeTimers();
         if (prefs != null) prefs.edit().putInt("unread_notification_count", 0).apply();
-        // Safety net: some OEMs (aggressive battery savers, certain Xiaomi/
-        // Samsung builds) can suppress NetworkCallback delivery in the
-        // background. Re-checking here means coming back to the app is
-        // always another chance to notice "we're online and something's
-        // still queued" even if the callback never fired.
-        ConnectivityManager resumeCm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-        if (resumeCm != null) {
-            boolean nowOnline = isOnline(resumeCm);
-            if (nowOnline != isCurrentlyOnline) {
-                isCurrentlyOnline = nowOnline;
-                updateOfflineBanner(isCurrentlyOnline);
-            }
-            if (isCurrentlyOnline && getQueueSize() > 0) {
-                flushOfflineQueue();
-            }
-        }
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        cancelQueueRetry();
         if (networkCallback != null && connectivityCallbackRegistered) {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
             if (cm != null) {
@@ -414,21 +368,6 @@ public class MainActivity extends AppCompatActivity {
         // made while offline for native code to store and later replay.
         webView.addJavascriptInterface(new OfflineQueueBridge(), "AndroidOfflineQueue");
 
-        // Exposes retry() to offline.html's own "Try again" button. Without
-        // this, that button (and the native refresh button below) just
-        // reloaded offline.html itself - a bundled local file that always
-        // "succeeds" instantly, so it looked like refresh "did nothing" and
-        // connectivity was never actually rechecked or the real page retried.
-        webView.addJavascriptInterface(new RetryBridge(), "AndroidRetry");
-
-        // Exposes capture()/getSaved() to the login-autofill shim in
-        // injectOfflineQueueScript, backed by CredentialVault (encrypted at
-        // rest). This is the actual "stay signed in like WhatsApp" feature -
-        // it doesn't change how long the server's own session lasts, but it
-        // means the app can silently log back in on your behalf the moment
-        // it notices a login page, instead of ever showing you one.
-        webView.addJavascriptInterface(new CredentialBridge(), "AndroidCredentials");
-
         // Makes sure a logged-in session actually survives closing and
         // reopening the app, instead of asking the user to sign in every
         // time. Cookies persist to disk by default, but are only flushed to
@@ -464,18 +403,6 @@ public class MainActivity extends AppCompatActivity {
                     // tel:, mailto:, whatsapp:, intent:, market:, upi:, etc. -
                     // always hand off to whatever app the OS has for it.
                     return openExternally(uri);
-                }
-
-                // An explicit logout is the one moment auto-login must NOT
-                // kick in - otherwise tapping "log out" would immediately
-                // sign the person straight back in, which would just look
-                // broken. Forgetting the saved credentials here is also
-                // exactly what "stay signed in until I log out" means.
-                String path = uri.getPath();
-                if (path != null && path.toLowerCase().contains("logout")) {
-                    CredentialVault.clear(getApplicationContext());
-                    pendingCredentials = null;
-                    skipAutoLoginOnce = true;
                 }
 
                 Uri homeUri = Uri.parse(homeUrl);
@@ -544,34 +471,7 @@ public class MainActivity extends AppCompatActivity {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 swipeRefresh.setRefreshing(false);
-
-                // A login page navigating away to a non-login page is the
-                // strongest signal we get that a session cookie was just
-                // freshly issued. Force an immediate, un-throttled flush
-                // right then, rather than trusting the normal periodic
-                // throttle - if the app gets killed in the next second or
-                // two, that's the difference between the login actually
-                // sticking and the user being asked to sign in again next
-                // open for no visible reason.
-                Uri currentUri = url != null ? Uri.parse(url) : null;
-                boolean cameFromLogin = lastPageUrl != null && isSensitiveUrl(Uri.parse(lastPageUrl));
-                boolean nowOnNonLoginPage = currentUri == null || !isSensitiveUrl(currentUri);
-                if (cameFromLogin && nowOnNonLoginPage) {
-                    CookieManager.getInstance().flush();
-                    lastCookieFlushTime = System.currentTimeMillis();
-                    // Only now, once we can see the login actually worked (it
-                    // moved on to a real page), is it safe to persist what
-                    // was captured at submit time - never save a login that
-                    // may have just failed.
-                    if (pendingCredentials != null) {
-                        CredentialVault.save(getApplicationContext(), pendingCredentials[0], pendingCredentials[1]);
-                        pendingCredentials = null;
-                    }
-                } else {
-                    maybeFlushCookies();
-                }
-                lastPageUrl = url;
-
+                maybeFlushCookies();
                 injectOfflineQueueScript(view, url);
 
                 // postVisualStateCallback fires once the page is actually
@@ -957,14 +857,10 @@ public class MainActivity extends AppCompatActivity {
     //
     // Real limit worth knowing: the JS-to-native bridge that carries queued
     // data has a practical size ceiling (large payloads risk a hard Android
-    // platform crash, TransactionTooLargeException). Rather than raising this
-    // number, oversized *image* files are downscaled/re-encoded to JPEG on
-    // the page side (canvas-based, a few hundred KB for a typical 3-8MB phone
-    // camera photo with no visible quality loss) before the size check runs,
-    // so a real photo almost never gets dropped. A file that still doesn't
-    // fit after compression (or isn't an image at all, e.g. a large video) is
-    // flagged as too large to queue rather than risking that crash - large
-    // video uploads made while offline are still not supported.
+    // platform crash, TransactionTooLargeException). Text fields and normal
+    // photos are fine; a queued file over ~4MB is flagged as too large to
+    // queue rather than risking that crash - large video uploads made while
+    // offline are not currently supported by this mechanism.
     // ==========================================================================
 
     private static final long MAX_QUEUEABLE_FILE_BYTES = 4L * 1024 * 1024;
@@ -984,61 +880,13 @@ public class MainActivity extends AppCompatActivity {
                 "if(window.__w2aQueueInstalled)return;" +
                 "window.__w2aQueueInstalled=true;" +
                 "var MAX_FILE_BYTES=" + MAX_QUEUEABLE_FILE_BYTES + ";" +
-                // Separate, smaller target for the online-upload path below -
-                // this one is about upload speed/data savings on a normal
-                // connection, not the offline bridge's hard safety ceiling.
-                "var ONLINE_COMPRESS_THRESHOLD_BYTES=600*1024;" +
-                "var ONLINE_TARGET_BYTES=900*1024;" +
-                "function fileToBase64(blob){" +
+                "function fileToBase64(file){" +
                 "  return new Promise(function(resolve,reject){" +
                 "    var reader=new FileReader();" +
                 "    reader.onload=function(){resolve(reader.result.split(',')[1]);};" +
                 "    reader.onerror=reject;" +
-                "    reader.readAsDataURL(blob);" +
+                "    reader.readAsDataURL(file);" +
                 "  });" +
-                "}" +
-                // Downscales/re-encodes an image File to JPEG at the given max
-                // dimension/quality via an offscreen canvas. Falls back to the
-                // original file (never throws) if decoding fails for any
-                // reason - callers treat the result as "best effort".
-                "function compressImageOnce(file,maxDim,quality){" +
-                "  return new Promise(function(resolve){" +
-                "    var url;" +
-                "    try{url=URL.createObjectURL(file);}catch(e){resolve(file);return;}" +
-                "    var img=new Image();" +
-                "    img.onload=function(){" +
-                "      try{" +
-                "        var w=img.naturalWidth||img.width,h=img.naturalHeight||img.height;" +
-                "        var scale=Math.min(1,maxDim/Math.max(w,h));" +
-                "        var cw=Math.max(1,Math.round(w*scale)),ch=Math.max(1,Math.round(h*scale));" +
-                "        var canvas=document.createElement('canvas');" +
-                "        canvas.width=cw;canvas.height=ch;" +
-                "        var ctx=canvas.getContext('2d');" +
-                "        ctx.drawImage(img,0,0,cw,ch);" +
-                "        URL.revokeObjectURL(url);" +
-                "        canvas.toBlob(function(blob){resolve(blob||file);},'image/jpeg',quality);" +
-                "      }catch(e){URL.revokeObjectURL(url);resolve(file);}" +
-                "    };" +
-                "    img.onerror=function(){URL.revokeObjectURL(url);resolve(file);};" +
-                "    img.src=url;" +
-                "  });" +
-                "}" +
-                // Tries progressively smaller/lower-quality passes until the
-                // result fits MAX_FILE_BYTES (or we run out of attempts), so a
-                // normal 3-8MB phone camera photo reliably ends up a few
-                // hundred KB instead of being dropped for being oversized.
-                "function compressImageUntilFits(file,maxBytes){" +
-                "  var attempts=[[1600,0.82],[1280,0.72],[1024,0.62],[800,0.55]];" +
-                "  var i=0,best=file;" +
-                "  function step(){" +
-                "    if(best.size<=maxBytes||i>=attempts.length)return Promise.resolve(best);" +
-                "    var opt=attempts[i++];" +
-                "    return compressImageOnce(file,opt[0],opt[1]).then(function(blob){" +
-                "      if(blob&&blob.size<best.size)best=blob;" +
-                "      return step();" +
-                "    });" +
-                "  }" +
-                "  return step();" +
                 "}" +
                 "function serializeFormData(formData){" +
                 "  var entries=[];" +
@@ -1047,17 +895,11 @@ public class MainActivity extends AppCompatActivity {
                 "    var key=pair[0],value=pair[1];" +
                 "    if(value instanceof File){" +
                 "      if(value.size===0)return null;" +
-                "      var isImage=value.type&&value.type.indexOf('image/')===0;" +
-                "      var prep=(isImage&&value.size>MAX_FILE_BYTES)" +
-                "        ?compressImageUntilFits(value,MAX_FILE_BYTES)" +
-                "        :Promise.resolve(value);" +
-                "      return prep.then(function(finalBlob){" +
-                "        if(!finalBlob||finalBlob.size>MAX_FILE_BYTES){" +
-                "          return {key:key,type:'file_too_large',name:value.name};" +
-                "        }" +
-                "        return fileToBase64(finalBlob).then(function(b64){" +
-                "          return {key:key,type:'file',name:value.name,mime:(finalBlob.type||value.type),data:b64};" +
-                "        });" +
+                "      if(value.size>MAX_FILE_BYTES){" +
+                "        return {key:key,type:'file_too_large',name:value.name};" +
+                "      }" +
+                "      return fileToBase64(value).then(function(b64){" +
+                "        return {key:key,type:'file',name:value.name,mime:value.type,data:b64};" +
                 "      });" +
                 "    }" +
                 "    return {key:key,type:'text',value:String(value)};" +
@@ -1071,81 +913,28 @@ public class MainActivity extends AppCompatActivity {
                 "  }" +
                 "  return false;" +
                 "}" +
-                // Prefer the native, authoritative connectivity check over
-                // navigator.onLine, which can stay stuck "true" in a WebView
-                // even after the device genuinely loses its connection.
-                "function w2aIsOffline(){" +
-                "  if(window.AndroidOfflineQueue&&window.AndroidOfflineQueue.isOnline){" +
-                "    try{return !window.AndroidOfflineQueue.isOnline();}catch(e){}" +
-                "  }" +
-                "  return !navigator.onLine;" +
-                "}" +
                 "document.addEventListener('submit',function(e){" +
+                "  if(navigator.onLine)return;" +
                 "  var form=e.target;" +
                 "  if(!(form instanceof HTMLFormElement))return;" +
-                "  if(w2aIsOffline()){" +
-                "    e.preventDefault();" +
-                "    var formData=new FormData(form);" +
-                "    var method=(form.method||'POST').toUpperCase();" +
-                "    var url=form.action||window.location.href;" +
-                "    var enctype=form.enctype||'application/x-www-form-urlencoded';" +
-                "    serializeFormData(formData).then(function(fields){" +
-                "      var queued=queueSubmission(url,method,fields,enctype);" +
-                "      if(queued&&window.AndroidOfflineQueue&&window.AndroidOfflineQueue.onQueued){" +
-                "        window.AndroidOfflineQueue.onQueued();" +
-                "      }" +
-                "    });" +
-                "    return;" +
-                "  }" +
-                // Online path: this doesn't touch queueing at all - the form
-                // still submits normally through the browser. It just
-                // shrinks any sizeable photo first, so a normal online photo
-                // upload is faster and uses less data on a weak connection,
-                // the same way the offline-queue path already did.
-                "  var fileInputs=form.querySelectorAll('input[type=file]');" +
-                "  var toCompress=[];" +
-                "  fileInputs.forEach(function(input){" +
-                "    if(!input.files||!input.files.length)return;" +
-                "    for(var i=0;i<input.files.length;i++){" +
-                "      var f=input.files[i];" +
-                "      if(f.type&&f.type.indexOf('image/')===0&&f.size>ONLINE_COMPRESS_THRESHOLD_BYTES){" +
-                "        toCompress.push({input:input,index:i,file:f});" +
-                "      }" +
+                "  e.preventDefault();" +
+                "  var formData=new FormData(form);" +
+                "  var method=(form.method||'POST').toUpperCase();" +
+                "  var url=form.action||window.location.href;" +
+                "  var enctype=form.enctype||'application/x-www-form-urlencoded';" +
+                "  serializeFormData(formData).then(function(fields){" +
+                "    var queued=queueSubmission(url,method,fields,enctype);" +
+                "    if(queued&&window.AndroidOfflineQueue&&window.AndroidOfflineQueue.onQueued){" +
+                "      window.AndroidOfflineQueue.onQueued();" +
                 "    }" +
                 "  });" +
-                "  if(toCompress.length===0||typeof DataTransfer==='undefined')return;" +
-                "  e.preventDefault();" +
-                "  Promise.all(toCompress.map(function(item){" +
-                "    return compressImageUntilFits(item.file,ONLINE_TARGET_BYTES).then(function(blob){" +
-                "      item.newFile=new File([blob],item.file.name,{type:(blob.type||item.file.type)});" +
-                "    });" +
-                "  })).then(function(){" +
-                "    var byInput=new Map();" +
-                "    toCompress.forEach(function(item){" +
-                "      if(!byInput.has(item.input))byInput.set(item.input,[]);" +
-                "      byInput.get(item.input).push(item);" +
-                "    });" +
-                "    byInput.forEach(function(items,input){" +
-                "      var repl={};" +
-                "      items.forEach(function(it){repl[it.index]=it.newFile;});" +
-                "      var dt=new DataTransfer();" +
-                "      for(var i=0;i<input.files.length;i++){" +
-                "        dt.items.add(repl[i]||input.files[i]);" +
-                "      }" +
-                "      input.files=dt.files;" +
-                "    });" +
-                // form.submit() (unlike requestSubmit()) does not re-dispatch
-                // the 'submit' event, so this can't loop back into this same
-                // handler - it goes straight to a normal browser submission.
-                "    form.submit();" +
-                "  }).catch(function(){form.submit();});" +
                 "},true);" +
                 "var originalFetch=window.fetch;" +
                 "if(originalFetch){" +
                 "  window.fetch=function(input,init){" +
                 "    init=init||{};" +
                 "    var method=(init.method||'GET').toUpperCase();" +
-                "    if(method==='GET'||!w2aIsOffline()){return originalFetch(input,init);}" +
+                "    if(method==='GET'||navigator.onLine){return originalFetch(input,init);}" +
                 "    var url=typeof input==='string'?input:input.url;" +
                 "    if(init.body&&typeof init.body==='string'){" +
                 "      var fields=[{key:'body',type:'text',value:init.body}];" +
@@ -1157,55 +946,6 @@ public class MainActivity extends AppCompatActivity {
                 "    return Promise.reject(new Error('Offline - request queued for later'));" +
                 "  };" +
                 "}" +
-                // Login persistence: if this page has a password field, try
-                // auto-filling+submitting any saved credentials once (so a
-                // forced-out session gets silently re-authenticated instead
-                // of showing the person a login screen), and separately
-                // capture whatever's typed on a manual submit so a fresh or
-                // changed login gets saved for next time. Native code only
-                // actually persists a capture once it confirms (on the next
-                // page) that the login succeeded.
-                "(function(){" +
-                "  var pwField=document.querySelector('input[type=password]');" +
-                "  if(!pwField)return;" +
-                "  var form=pwField.form;" +
-                "  if(!form)return;" +
-                "  function pickUserField(){" +
-                "    return form.querySelector('input[type=email]')||" +
-                "      form.querySelector('input[type=text]')||" +
-                "      form.querySelector('input:not([type=password]):not([type=hidden]):not([type=submit]):not([type=checkbox])');" +
-                "  }" +
-                "  if(!window.__w2aAutoLoginTried&&window.AndroidCredentials){" +
-                "    window.__w2aAutoLoginTried=true;" +
-                "    try{" +
-                "      var savedRaw=window.AndroidCredentials.getSaved();" +
-                "      if(savedRaw){" +
-                "        var saved=JSON.parse(savedRaw);" +
-                "        var userField=pickUserField();" +
-                "        if(userField&&!userField.value&&!pwField.value){" +
-                "          userField.value=saved.u;" +
-                "          pwField.value=saved.p;" +
-                "          var remember=form.querySelector('input[type=checkbox]');" +
-                "          if(remember&&!remember.checked)remember.checked=true;" +
-                "          setTimeout(function(){" +
-                "            if(form.requestSubmit)form.requestSubmit();else form.submit();" +
-                "          },50);" +
-                "        }" +
-                "      }" +
-                "    }catch(e){}" +
-                "  }" +
-                "  if(!form.__w2aCaptureBound){" +
-                "    form.__w2aCaptureBound=true;" +
-                "    form.addEventListener('submit',function(){" +
-                "      try{" +
-                "        var userField=pickUserField();" +
-                "        if(userField&&pwField.value&&window.AndroidCredentials){" +
-                "          window.AndroidCredentials.capture(userField.value,pwField.value);" +
-                "        }" +
-                "      }catch(e){}" +
-                "    },true);" +
-                "  }" +
-                "})();" +
                 "})();";
 
         view.evaluateJavascript(script, null);
@@ -1216,100 +956,10 @@ public class MainActivity extends AppCompatActivity {
      * are called from the WebView's own thread, not necessarily the main
      * thread, so UI updates are posted back via runOnUiThread.
      */
-    /**
-     * Called from offline.html's "Try again" button. Does a real, fresh
-     * connectivity re-check (not the possibly-stale isCurrentlyOnline flag)
-     * and, if the page currently on screen is the offline placeholder,
-     * reloads the actual page the user originally wanted instead of just
-     * reloading the placeholder itself.
-     */
-    private class RetryBridge {
-        @android.webkit.JavascriptInterface
-        public void retry() {
-            runOnUiThread(MainActivity.this::attemptRealRefresh);
-        }
-    }
-
-    /**
-     * Re-checks real connectivity right now and reloads whatever the user
-     * actually meant to see - the last real page that failed, if that's
-     * what's currently showing the offline placeholder, otherwise just the
-     * current page.
-     */
-    private void attemptRealRefresh() {
-        ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-        boolean nowOnline = cm != null && isOnline(cm);
-        isCurrentlyOnline = nowOnline;
-        updateOfflineBanner(nowOnline);
-
-        String currentUrl = webView.getUrl();
-        boolean showingOfflinePlaceholder = currentUrl != null
-                && currentUrl.startsWith("file:///android_asset/offline.html");
-
-        if (showingOfflinePlaceholder && lastConfirmedCacheMissUrl != null) {
-            webView.loadUrl(lastConfirmedCacheMissUrl);
-        } else {
-            webView.reload();
-        }
-
-        if (nowOnline && getQueueSize() > 0) {
-            flushOfflineQueue();
-        }
-    }
-
-    /**
-     * Backs the login-autofill/capture shim injected into every page.
-     * getSaved() is called synchronously from JS and returns straight away -
-     * addJavascriptInterface methods support a real return value, unlike a
-     * postMessage-style bridge.
-     */
-    private class CredentialBridge {
-        @android.webkit.JavascriptInterface
-        public void capture(String username, String password) {
-            pendingCredentials = new String[]{username, password};
-        }
-
-        @android.webkit.JavascriptInterface
-        public String getSaved() {
-            if (skipAutoLoginOnce) {
-                // Consumed once: the person just tapped logout, so the very
-                // next login page they land on should NOT be auto-filled -
-                // that would make logout look broken.
-                skipAutoLoginOnce = false;
-                return null;
-            }
-            String[] creds = CredentialVault.get(getApplicationContext());
-            if (creds == null) return null;
-            try {
-                JSONObject o = new JSONObject();
-                o.put("u", creds[0]);
-                o.put("p", creds[1]);
-                return o.toString();
-            } catch (Exception e) {
-                return null;
-            }
-        }
-    }
-
     private class OfflineQueueBridge {
         @android.webkit.JavascriptInterface
         public void enqueue(String json) {
             queueSubmission(json);
-        }
-
-        /**
-         * Synchronous, authoritative connectivity check for the page JS to
-         * use instead of navigator.onLine. navigator.onLine inside an
-         * Android WebView frequently doesn't track real connectivity - it
-         * can stay "true" after the device actually loses its connection -
-         * which was silently swallowing offline submissions instead of
-         * queuing them (the request would be attempted, fail, and never
-         * get written to the queue file at all).
-         */
-        @android.webkit.JavascriptInterface
-        public boolean isOnline() {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-            return cm != null && MainActivity.this.isOnline(cm);
         }
 
         @android.webkit.JavascriptInterface
@@ -1318,19 +968,48 @@ public class MainActivity extends AppCompatActivity {
                 updateSyncBanner(getQueueSize());
                 showSnackbar("Saved - will send once you're back online");
             });
-            // Schedules the OS-managed background retry too, not just the
-            // in-app one - guarantees this still gets sent even if the app
-            // is closed before connectivity returns.
-            OfflineQueueWorker.scheduleIfNeeded(getApplicationContext());
         }
     }
 
     private void queueSubmission(String json) {
-        OfflineQueueSync.queueSubmission(this, json);
+        synchronized (queueLock) {
+            try (java.io.FileWriter writer = new java.io.FileWriter(offlineQueueFile, true)) {
+                writer.write(json.replace("\n", " ") + "\n");
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     private int getQueueSize() {
-        return OfflineQueueSync.getQueueSize(this);
+        synchronized (queueLock) {
+            if (!offlineQueueFile.exists()) return 0;
+            try {
+                return readQueueLines().size();
+            } catch (Exception e) {
+                return 0;
+            }
+        }
+    }
+
+    private List<String> readQueueLines() throws java.io.IOException {
+        List<String> lines = new ArrayList<>();
+        if (!offlineQueueFile.exists()) return lines;
+        try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(offlineQueueFile))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.trim().isEmpty()) lines.add(line);
+            }
+        }
+        return lines;
+    }
+
+    private void writeQueueLines(List<String> lines) {
+        try (java.io.FileWriter writer = new java.io.FileWriter(offlineQueueFile, false)) {
+            for (String line : lines) {
+                writer.write(line + "\n");
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     private void updateSyncBanner(int pendingCount) {
@@ -1340,86 +1019,160 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         String label = pendingCount == 1
-                ? "1 item waiting to sync"
-                : pendingCount + " items waiting to sync";
-        if (syncPendingText != null) syncPendingText.setText(label);
+                ? "1 item waiting to sync - will send automatically"
+                : pendingCount + " items waiting to sync - will send automatically";
+        syncPendingBanner.setText(label);
         syncPendingBanner.setVisibility(View.VISIBLE);
     }
 
     /**
-     * The "Send now" button on the sync banner. This can't literally send
-     * data with zero network path - what it actually does is what the
-     * person means by it in practice: stop waiting for the automatic
-     * backoff timer and try this very instant, which matters most right
-     * when they've just watched their signal bars come back.
-     */
-    private void forceSendQueueNow() {
-        ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-        boolean nowOnline = cm != null && isOnline(cm);
-        isCurrentlyOnline = nowOnline;
-        updateOfflineBanner(nowOnline);
-
-        if (!nowOnline) {
-            showSnackbar("Still no connection - will send automatically once you're back online");
-            return;
-        }
-        showSnackbar("Sending now\u2026");
-        flushOfflineQueue();
-    }
-
-    /**
-     * Attempts an immediate foreground flush, for fast visible feedback
-     * while the app is open. OfflineQueueWorker (scheduled alongside this)
-     * is the actual reliability backstop - it keeps retrying in the
-     * background via the OS even if the app gets closed before this
-     * finishes or before connectivity returns.
+     * Attempts to actually send every queued submission as a real HTTP
+     * request. Anything that still fails (server still unreachable, etc.)
+     * stays queued for the next attempt instead of being lost.
      */
     private void flushOfflineQueue() {
         new Thread(() -> {
-            OfflineQueueSync.FlushResult result = OfflineQueueSync.flush(this);
-            final int finalSucceeded = result.succeeded;
-            final int finalRemaining = result.remaining;
+            List<String> lines;
+            synchronized (queueLock) {
+                try {
+                    lines = readQueueLines();
+                } catch (Exception e) {
+                    return;
+                }
+            }
+            if (lines.isEmpty()) return;
+
+            List<String> remaining = new ArrayList<>();
+            int succeeded = 0;
+            for (String line : lines) {
+                if (trySubmitQueuedItem(line)) {
+                    succeeded++;
+                } else {
+                    remaining.add(line);
+                }
+            }
+
+            synchronized (queueLock) {
+                writeQueueLines(remaining);
+            }
+
+            final int finalSucceeded = succeeded;
+            final int finalRemaining = remaining.size();
             runOnUiThread(() -> {
                 updateSyncBanner(finalRemaining);
                 if (finalSucceeded > 0) {
                     showSnackbar(finalSucceeded == 1 ? "1 saved item sent" : finalSucceeded + " saved items sent");
                 }
-                if (finalRemaining > 0) {
-                    OfflineQueueWorker.scheduleIfNeeded(getApplicationContext());
-                    if (isCurrentlyOnline) scheduleQueueRetry();
-                } else {
-                    cancelQueueRetry();
-                }
             });
         }).start();
     }
 
-    /**
-     * Schedules another flush attempt on a short backoff. Safe to call
-     * repeatedly - each call replaces any pending retry rather than stacking
-     * them up.
-     */
-    private void scheduleQueueRetry() {
-        cancelQueueRetryCallbackOnly();
-        int idx = Math.min(flushRetryAttempt, FLUSH_RETRY_DELAYS_MS.length - 1);
-        long delay = FLUSH_RETRY_DELAYS_MS[idx];
-        flushRetryAttempt++;
-        pendingQueueRetry = () -> {
-            if (isCurrentlyOnline) flushOfflineQueue();
-        };
-        queueRetryHandler.postDelayed(pendingQueueRetry, delay);
+    private boolean trySubmitQueuedItem(String jsonLine) {
+        try {
+            JSONObject obj = new JSONObject(jsonLine);
+            String urlStr = obj.getString("url");
+            String method = obj.optString("method", "POST");
+            String enctype = obj.optString("enctype", "application/x-www-form-urlencoded");
+            JSONArray fields = obj.getJSONArray("fields");
+
+            boolean hasFile = false;
+            for (int i = 0; i < fields.length(); i++) {
+                if ("file".equals(fields.getJSONObject(i).optString("type"))) {
+                    hasFile = true;
+                    break;
+                }
+            }
+
+            HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+            conn.setRequestMethod("GET".equalsIgnoreCase(method) ? "POST" : method); // never replay as GET
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(15000);
+            conn.setInstanceFollowRedirects(true);
+
+            String cookie = CookieManager.getInstance().getCookie(urlStr);
+            if (cookie != null) conn.setRequestProperty("Cookie", cookie);
+
+            if (hasFile || (enctype != null && enctype.toLowerCase().contains("multipart"))) {
+                submitAsMultipart(conn, fields);
+            } else if ("raw".equals(enctype)) {
+                submitAsRawBody(conn, fields);
+            } else {
+                submitAsUrlEncoded(conn, fields);
+            }
+
+            int status = conn.getResponseCode();
+            conn.disconnect();
+            return status >= 200 && status < 400;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
-    /** Cancels any pending retry and resets the backoff back to the start. */
-    private void cancelQueueRetry() {
-        cancelQueueRetryCallbackOnly();
-        flushRetryAttempt = 0;
+    private void submitAsUrlEncoded(HttpURLConnection conn, JSONArray fields) throws Exception {
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+        StringBuilder body = new StringBuilder();
+        for (int i = 0; i < fields.length(); i++) {
+            JSONObject f = fields.getJSONObject(i);
+            if (!"text".equals(f.optString("type"))) continue;
+            if (body.length() > 0) body.append('&');
+            body.append(java.net.URLEncoder.encode(f.getString("key"), "UTF-8"));
+            body.append('=');
+            body.append(java.net.URLEncoder.encode(f.optString("value", ""), "UTF-8"));
+        }
+        try (java.io.OutputStream os = conn.getOutputStream()) {
+            os.write(body.toString().getBytes("UTF-8"));
+        }
     }
 
-    private void cancelQueueRetryCallbackOnly() {
-        if (pendingQueueRetry != null) {
-            queueRetryHandler.removeCallbacks(pendingQueueRetry);
-            pendingQueueRetry = null;
+    private void submitAsRawBody(HttpURLConnection conn, JSONArray fields) throws Exception {
+        String body = "";
+        for (int i = 0; i < fields.length(); i++) {
+            JSONObject f = fields.getJSONObject(i);
+            if ("body".equals(f.optString("key"))) {
+                body = f.optString("value", "");
+                break;
+            }
+        }
+        try (java.io.OutputStream os = conn.getOutputStream()) {
+            os.write(body.getBytes("UTF-8"));
+        }
+    }
+
+    private void submitAsMultipart(HttpURLConnection conn, JSONArray fields) throws Exception {
+        String boundary = "----w2aBoundary" + System.currentTimeMillis();
+        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+        try (java.io.OutputStream os = conn.getOutputStream();
+             java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.OutputStreamWriter(os, "UTF-8"), true)) {
+
+            for (int i = 0; i < fields.length(); i++) {
+                JSONObject f = fields.getJSONObject(i);
+                String type = f.optString("type");
+                String key = f.optString("key");
+
+                writer.append("--").append(boundary).append("\r\n");
+
+                if ("file".equals(type)) {
+                    String name = f.optString("name", "upload");
+                    String mime = f.optString("mime", "application/octet-stream");
+                    writer.append("Content-Disposition: form-data; name=\"").append(key)
+                            .append("\"; filename=\"").append(name).append("\"\r\n");
+                    writer.append("Content-Type: ").append(mime).append("\r\n\r\n");
+                    writer.flush();
+                    byte[] fileBytes = android.util.Base64.decode(f.optString("data", ""), android.util.Base64.DEFAULT);
+                    os.write(fileBytes);
+                    os.flush();
+                    writer.append("\r\n");
+                } else if ("text".equals(type)) {
+                    writer.append("Content-Disposition: form-data; name=\"").append(key).append("\"\r\n\r\n");
+                    writer.append(f.optString("value", "")).append("\r\n");
+                }
+                // "file_too_large" entries are intentionally skipped on replay.
+            }
+
+            writer.append("--").append(boundary).append("--\r\n");
+            writer.flush();
         }
     }
 
@@ -1632,7 +1385,7 @@ public class MainActivity extends AppCompatActivity {
     private void setupRefreshButton() {
         refreshButton.setOnClickListener(v -> {
             v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
-            attemptRealRefresh();
+            webView.reload();
         });
 
         makeDraggable(refreshButton, "refresh_btn");
@@ -1867,25 +1620,7 @@ public class MainActivity extends AppCompatActivity {
 
         isCurrentlyOnline = isOnline(cm);
         updateOfflineBanner(isCurrentlyOnline);
-        // If the app was closed while offline with items still queued, and
-        // is reopened when a connection already exists, there's no
-        // offline->online transition for onAvailable to react to - so try a
-        // flush right away instead of waiting for the network to flap.
-        if (isCurrentlyOnline && getQueueSize() > 0) {
-            flushOfflineQueue();
-        } else if (getQueueSize() > 0) {
-            OfflineQueueWorker.scheduleIfNeeded(getApplicationContext());
-        }
 
-        // NET_CAPABILITY_VALIDATED (a real, confirmed-working internet check)
-        // sounds like the right thing to require, but in practice many real
-        // networks - school/campus WiFi with a slow or blocked validation
-        // endpoint, some captive portals, certain DNS setups - never end up
-        // marked "validated" even though the app's own server is perfectly
-        // reachable. Requiring it turned out to block syncing entirely on
-        // those networks. So: fire promptly on plain internet capability,
-        // and lean on the retry-with-backoff below (plus the onResume check
-        // above) to absorb the "fired a little too early" case instead.
         NetworkRequest request = new NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .build();
@@ -1899,16 +1634,13 @@ public class MainActivity extends AppCompatActivity {
                     updateOfflineBanner(true);
                     if (wasOffline) showSnackbar("Back online");
                 });
-                flushOfflineQueue();
+                if (wasOffline) flushOfflineQueue();
             }
 
             @Override
             public void onLost(Network network) {
                 isCurrentlyOnline = isOnline(cm);
-                runOnUiThread(() -> {
-                    updateOfflineBanner(isCurrentlyOnline);
-                    if (!isCurrentlyOnline) cancelQueueRetry();
-                });
+                runOnUiThread(() -> updateOfflineBanner(isCurrentlyOnline));
             }
         };
 
