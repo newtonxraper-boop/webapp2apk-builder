@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.WebApp2Apk" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimary">{{PRIMARY_COLOR}}</item>
+        <item name="colorPrimaryDark">{{PRIMARY_DARK_COLOR}}</item>
+        <item name="colorAccent">{{ACCENT_COLOR}}</item>
+        <item name="android:colorEdgeEffect">{{ACCENT_COLOR}}</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="fontFamily">sans-serif-medium</item>
+    </style>
+</resources>

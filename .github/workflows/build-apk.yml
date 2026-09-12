@@ -1,0 +1,139 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'App Name'
+        required: false
+        default: 'WebApp'
+      app_url:
+        description: 'App URL'
+        required: false
+        default: 'https://example.com'
+      package_name:
+        description: 'Package Name / applicationId (e.g. com.example.myapp). Leave blank to auto-generate from App Name.'
+        required: false
+        default: ''
+      request_id:
+        description: 'Internal request/build ID (optional)'
+        required: false
+        default: ''
+      icon_url:
+        description: 'Public URL to the uploaded app icon (PNG/JPG)'
+        required: false
+        default: ''
+      primary_color:
+        description: 'Primary hex color, e.g. #3DDC84'
+        required: false
+        default: '#3DDC84'
+      accent_color:
+        description: 'Accent hex color, e.g. #3DDC84'
+        required: false
+        default: '#3DDC84'
+      splash_enabled:
+        description: "'true' or 'false'"
+        required: false
+        default: 'true'
+      push_enabled:
+        description: "'true' or 'false'"
+        required: false
+        default: 'false'
+      filecamera_enabled:
+        description: "'true' or 'false'"
+        required: false
+        default: 'true'
+      nav_items_b64:
+        description: 'Base64-encoded JSON array of bottom nav tabs'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Install Pillow for icon processing
+        run: pip3 install --quiet --break-system-packages Pillow
+
+      - name: Generate app resources
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+          APP_URL: ${{ inputs.app_url }}
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          ICON_URL: ${{ inputs.icon_url }}
+          PRIMARY_COLOR: ${{ inputs.primary_color }}
+          ACCENT_COLOR: ${{ inputs.accent_color }}
+          SPLASH_ENABLED: ${{ inputs.splash_enabled }}
+          PUSH_ENABLED: ${{ inputs.push_enabled }}
+          FILECAMERA_ENABLED: ${{ inputs.filecamera_enabled }}
+          NAV_ITEMS_B64: ${{ inputs.nav_items_b64 }}
+        run: python3 scripts/generate_resources.py
+
+      - name: Show generated config files (debug)
+        run: |
+          echo "----- app/build.gradle -----"
+          cat android-template/app/build.gradle
+          echo "----- AndroidManifest.xml -----"
+          cat android-template/app/src/main/AndroidManifest.xml
+          echo "----- colors.xml -----"
+          cat android-template/app/src/main/res/values/colors.xml
+          echo "----- themes.xml -----"
+          cat android-template/app/src/main/res/values/themes.xml
+          echo "----- app_config.json -----"
+          cat android-template/app/src/main/assets/app_config.json
+          echo "----- nav_items.json -----"
+          cat android-template/app/src/main/assets/nav_items.json
+
+      - name: Generate debug keystore if missing
+        run: |
+          if [ ! -f android-template/app/debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore android-template/app/debug.keystore \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build Release APK
+        run: |
+          cd android-template
+          gradle assembleRelease --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: android-template/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Deliver APK to website
+        env:
+          RECEIVE_URL: ${{ secrets.RECEIVE_URL }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+        if: env.RECEIVE_URL != ''
+        run: |
+          APK_PATH=$(find android-template/app/build/outputs/apk/release -name '*.apk' | head -n1)
+          if [ -z "$APK_PATH" ]; then
+            echo "No APK found to deliver"; exit 1
+          fi
+          curl -sS -f -X POST "$RECEIVE_URL" \
+            -F "token=$CALLBACK_SECRET" \
+            -F "request_id=${{ inputs.request_id }}" \
+            -F "apk=@${APK_PATH}"
+          echo "Delivered APK to website"

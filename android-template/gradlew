@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+APP_BASE_NAME=`basename "$0"`
+if [ -n "$JAVA_HOME" ] ; then
+    JAVACMD="$JAVA_HOME/bin/java"
+else
+    JAVACMD="java"
+fi
+CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
+exec "$JAVACMD" -classpath "$CLASSPATH" org.gradle.wrapper.GradleWrapperMain "$@"
