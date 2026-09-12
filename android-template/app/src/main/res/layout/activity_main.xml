@@ -35,21 +35,46 @@
         android:alpha="0.95"
         android:visibility="gone" />
 
-    <TextView
+    <LinearLayout
         android:id="@+id/syncPendingBanner"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_margin="8dp"
         android:background="@drawable/banner_bg_update"
-        android:text=""
-        android:textColor="#04150A"
-        android:textStyle="bold"
-        android:textSize="12sp"
-        android:gravity="center"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
         android:padding="10dp"
         android:elevation="4dp"
         android:alpha="0.95"
-        android:visibility="gone" />
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/syncPendingText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text=""
+            android:textColor="#04150A"
+            android:textStyle="bold"
+            android:textSize="12sp" />
+
+        <TextView
+            android:id="@+id/syncPendingSendNowButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="Send now"
+            android:textColor="#04150A"
+            android:textStyle="bold"
+            android:textSize="12sp"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp"
+            android:background="@drawable/sync_action_button_bg"
+            android:clickable="true"
+            android:focusable="true" />
+    </LinearLayout>
 
     <FrameLayout
         android:layout_width="match_parent"
