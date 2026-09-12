@@ -1140,6 +1140,36 @@ public class MainActivity extends AppCompatActivity {
                 "    form.submit();" +
                 "  }).catch(function(){form.submit();});" +
                 "},true);" +
+                // Shared helper: turns any of the three body shapes real app
+                // code actually sends (FormData, URLSearchParams, or a plain
+                // string) into the same {key,type,value/data} field list the
+                // native replay logic expects, then queues it and fires the
+                // "saved for later" callback. Returns a Promise so callers
+                // can wait for file-to-base64 conversion (FormData case)
+                // before moving on.
+                "function w2aQueueBody(url,method,body,fallbackEnctype){" +
+                "  var p;" +
+                "  if(typeof FormData!=='undefined'&&body instanceof FormData){" +
+                "    p=serializeFormData(body).then(function(fields){" +
+                "      queueSubmission(url,method,fields,'multipart/form-data');" +
+                "    });" +
+                "  }else if(typeof URLSearchParams!=='undefined'&&body instanceof URLSearchParams){" +
+                "    var fields=[];" +
+                "    body.forEach(function(value,key){fields.push({key:key,type:'text',value:String(value)});});" +
+                "    queueSubmission(url,method,fields,'application/x-www-form-urlencoded');" +
+                "    p=Promise.resolve();" +
+                "  }else if(typeof body==='string'&&body.length>0){" +
+                "    queueSubmission(url,method,[{key:'body',type:'text',value:body}],'raw');" +
+                "    p=Promise.resolve();" +
+                "  }else{" +
+                "    p=Promise.resolve();" +
+                "  }" +
+                "  return p.then(function(){" +
+                "    if(window.AndroidOfflineQueue&&window.AndroidOfflineQueue.onQueued){" +
+                "      window.AndroidOfflineQueue.onQueued();" +
+                "    }" +
+                "  });" +
+                "}" +
                 "var originalFetch=window.fetch;" +
                 "if(originalFetch){" +
                 "  window.fetch=function(input,init){" +
@@ -1147,14 +1177,46 @@ public class MainActivity extends AppCompatActivity {
                 "    var method=(init.method||'GET').toUpperCase();" +
                 "    if(method==='GET'||!w2aIsOffline()){return originalFetch(input,init);}" +
                 "    var url=typeof input==='string'?input:input.url;" +
-                "    if(init.body&&typeof init.body==='string'){" +
-                "      var fields=[{key:'body',type:'text',value:init.body}];" +
-                "      queueSubmission(url,method,fields,'raw');" +
-                "      if(window.AndroidOfflineQueue&&window.AndroidOfflineQueue.onQueued){" +
-                "        window.AndroidOfflineQueue.onQueued();" +
-                "      }" +
-                "    }" +
+                "    w2aQueueBody(url,method,init.body,'raw');" +
                 "    return Promise.reject(new Error('Offline - request queued for later'));" +
+                "  };" +
+                "}" +
+                // Most PHP/jQuery apps submit AJAX via XMLHttpRequest, not
+                // fetch - without this, those submissions were falling
+                // straight through to the network while offline, failing
+                // silently, and never reaching the queue at all.
+                "var OrigXHR=window.XMLHttpRequest;" +
+                "if(OrigXHR){" +
+                "  var origOpen=OrigXHR.prototype.open;" +
+                "  var origSend=OrigXHR.prototype.send;" +
+                "  var origSetHeader=OrigXHR.prototype.setRequestHeader;" +
+                "  OrigXHR.prototype.open=function(method,url){" +
+                "    this.__w2aMethod=(method||'GET').toUpperCase();" +
+                "    this.__w2aUrl=url;" +
+                "    return origOpen.apply(this,arguments);" +
+                "  };" +
+                "  OrigXHR.prototype.setRequestHeader=function(name,value){" +
+                "    return origSetHeader.apply(this,arguments);" +
+                "  };" +
+                "  OrigXHR.prototype.send=function(body){" +
+                "    var self=this;" +
+                "    var method=this.__w2aMethod||'GET';" +
+                "    if(method==='GET'||!w2aIsOffline()){return origSend.apply(this,arguments);}" +
+                "    var url=this.__w2aUrl||'';" +
+                "    w2aQueueBody(url,method,body,'raw').then(function(){" +
+                // Simulate the same failed-request state a real dropped
+                // connection would produce, asynchronously, so any app code
+                // waiting on onload/onreadystatechange/onerror behaves the
+                // way it already does today instead of hanging forever -
+                // the data itself is safely queued regardless.
+                "      setTimeout(function(){" +
+                "        try{Object.defineProperty(self,'readyState',{value:4,configurable:true});}catch(e){}" +
+                "        try{Object.defineProperty(self,'status',{value:0,configurable:true});}catch(e){}" +
+                "        if(typeof self.onreadystatechange==='function')self.onreadystatechange();" +
+                "        if(typeof self.onerror==='function')self.onerror(new ProgressEvent('error'));" +
+                "        try{self.dispatchEvent(new ProgressEvent('error'));}catch(e){}" +
+                "      },0);" +
+                "    });" +
                 "  };" +
                 "}" +
                 // Login persistence: if this page has a password field, try
