@@ -1071,10 +1071,19 @@ public class MainActivity extends AppCompatActivity {
                 "  }" +
                 "  return false;" +
                 "}" +
+                // Prefer the native, authoritative connectivity check over
+                // navigator.onLine, which can stay stuck "true" in a WebView
+                // even after the device genuinely loses its connection.
+                "function w2aIsOffline(){" +
+                "  if(window.AndroidOfflineQueue&&window.AndroidOfflineQueue.isOnline){" +
+                "    try{return !window.AndroidOfflineQueue.isOnline();}catch(e){}" +
+                "  }" +
+                "  return !navigator.onLine;" +
+                "}" +
                 "document.addEventListener('submit',function(e){" +
                 "  var form=e.target;" +
                 "  if(!(form instanceof HTMLFormElement))return;" +
-                "  if(!navigator.onLine){" +
+                "  if(w2aIsOffline()){" +
                 "    e.preventDefault();" +
                 "    var formData=new FormData(form);" +
                 "    var method=(form.method||'POST').toUpperCase();" +
@@ -1136,7 +1145,7 @@ public class MainActivity extends AppCompatActivity {
                 "  window.fetch=function(input,init){" +
                 "    init=init||{};" +
                 "    var method=(init.method||'GET').toUpperCase();" +
-                "    if(method==='GET'||navigator.onLine){return originalFetch(input,init);}" +
+                "    if(method==='GET'||!w2aIsOffline()){return originalFetch(input,init);}" +
                 "    var url=typeof input==='string'?input:input.url;" +
                 "    if(init.body&&typeof init.body==='string'){" +
                 "      var fields=[{key:'body',type:'text',value:init.body}];" +
@@ -1286,6 +1295,21 @@ public class MainActivity extends AppCompatActivity {
         @android.webkit.JavascriptInterface
         public void enqueue(String json) {
             queueSubmission(json);
+        }
+
+        /**
+         * Synchronous, authoritative connectivity check for the page JS to
+         * use instead of navigator.onLine. navigator.onLine inside an
+         * Android WebView frequently doesn't track real connectivity - it
+         * can stay "true" after the device actually loses its connection -
+         * which was silently swallowing offline submissions instead of
+         * queuing them (the request would be attempted, fail, and never
+         * get written to the queue file at all).
+         */
+        @android.webkit.JavascriptInterface
+        public boolean isOnline() {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            return cm != null && MainActivity.this.isOnline(cm);
         }
 
         @android.webkit.JavascriptInterface
