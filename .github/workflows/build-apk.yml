@@ -134,14 +134,17 @@ jobs:
           fi
           echo "  OK."
 
-          echo "Checking RELEASE_KEY_ALIAS + RELEASE_KEY_PASSWORD..."
-          if ! keytool -keypasswd -alias "$KEY_ALIAS" -keystore "$KS" \
-                -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" -new "$KEY_PASSWORD" \
-                > /tmp/key_err.txt 2>&1; then
+          echo "Checking RELEASE_KEY_ALIAS + RELEASE_KEY_PASSWORD (via a real test sign, like Gradle does)..."
+          TMPDIR=$(mktemp -d)
+          echo "test" > "$TMPDIR/test.txt"
+          jar cf "$TMPDIR/test.jar" -C "$TMPDIR" test.txt
+          if ! jarsigner -keystore "$KS" -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+                "$TMPDIR/test.jar" "$KEY_ALIAS" > /tmp/key_err.txt 2>&1; then
             echo "::error::RELEASE_KEY_PASSWORD does not unlock alias '$KEY_ALIAS' in this keystore (or RELEASE_KEY_ALIAS is wrong - it should be 'releasekey' unless you changed it). Re-copy RELEASE_KEY_ALIAS and RELEASE_KEY_PASSWORD exactly, with no extra spaces or newlines."
             cat /tmp/key_err.txt
             exit 1
           fi
+          rm -rf "$TMPDIR"
           echo "  OK."
 
           echo "All release signing secrets match the keystore."
