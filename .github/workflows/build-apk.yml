@@ -121,6 +121,34 @@ jobs:
             echo "Falling back to a debug keystore for now (NOT suitable for real distribution - anyone can re-sign updates to this app)."
           fi
 
+      - name: Verify release keystore secrets match (fast pre-flight check)
+        if: env.KEYSTORE_PATH != ''
+        run: |
+          KS="android-template/app/${KEYSTORE_PATH}"
+
+          echo "Checking RELEASE_KEYSTORE_PASSWORD + RELEASE_KEYSTORE_BASE64..."
+          if ! keytool -list -storepass "$KEYSTORE_PASSWORD" -keystore "$KS" > /dev/null 2>/tmp/store_err.txt; then
+            echo "::error::RELEASE_KEYSTORE_PASSWORD does not match this keystore, or RELEASE_KEYSTORE_BASE64 is corrupted/stale. Re-copy both from the latest 'Generate Release Keystore' run and update both secrets together."
+            cat /tmp/store_err.txt
+            exit 1
+          fi
+          echo "  OK."
+
+          echo "Checking RELEASE_KEY_ALIAS + RELEASE_KEY_PASSWORD (via a real test sign, like Gradle does)..."
+          TMPDIR=$(mktemp -d)
+          echo "test" > "$TMPDIR/test.txt"
+          jar cf "$TMPDIR/test.jar" -C "$TMPDIR" test.txt
+          if ! jarsigner -keystore "$KS" -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+                "$TMPDIR/test.jar" "$KEY_ALIAS" > /tmp/key_err.txt 2>&1; then
+            echo "::error::RELEASE_KEY_PASSWORD does not unlock alias '$KEY_ALIAS' in this keystore (or RELEASE_KEY_ALIAS is wrong - it should be 'releasekey' unless you changed it). Re-copy RELEASE_KEY_ALIAS and RELEASE_KEY_PASSWORD exactly, with no extra spaces or newlines."
+            cat /tmp/key_err.txt
+            exit 1
+          fi
+          rm -rf "$TMPDIR"
+          echo "  OK."
+
+          echo "All release signing secrets match the keystore."
+
       - name: Generate debug keystore if missing (fallback only)
         run: |
           if [ -z "$KEYSTORE_PATH" ] && [ ! -f android-template/app/debug.keystore ]; then

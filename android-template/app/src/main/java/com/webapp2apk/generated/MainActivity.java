@@ -621,14 +621,41 @@ public class MainActivity extends AppCompatActivity {
             return null;
         }
 
+        String cacheKey = sha256(uri.toString());
+        File bodyFile = new File(offlineCacheDir, cacheKey + ".body.gz");
+        File metaFile = new File(offlineCacheDir, cacheKey + ".meta");
+
         if (!isCurrentlyOnline) {
-            String cacheKey = sha256(uri.toString());
-            File bodyFile = new File(offlineCacheDir, cacheKey + ".body.gz");
-            File metaFile = new File(offlineCacheDir, cacheKey + ".meta");
             return serveFromCacheFile(bodyFile, metaFile, uri);
         }
 
+        // The OS can report a validated network even when a carrier is
+        // transparently redirecting every request to its own page (e.g.
+        // MTN's "no data bundle" walled garden) - that looks like a normal
+        // successful page load to WebView's own network stack, since it's a
+        // real 200 response, just from the wrong host. For the main page
+        // navigation, route through our own connection (which follows
+        // redirects itself) so we can check where it actually landed,
+        // instead of trusting WebView's built-in fetch blindly.
+        if (request.isForMainFrame()) {
+            return fetchAndCache(uri, bodyFile, metaFile);
+        }
+
         return null;
+    }
+
+    /**
+     * True if actualHost is the same site as requestedHost, or a subdomain
+     * of it (or vice versa) - e.g. "cdn.example.com" counts as the same
+     * site as "example.com". Anything else (like a carrier's own domain) is
+     * treated as an off-site redirect.
+     */
+    private boolean isSameSiteHost(String requestedHost, String actualHost) {
+        if (requestedHost == null || actualHost == null) return false;
+        if (requestedHost.equalsIgnoreCase(actualHost)) return true;
+        String reqLower = requestedHost.toLowerCase();
+        String actLower = actualHost.toLowerCase();
+        return actLower.endsWith("." + reqLower) || reqLower.endsWith("." + actLower);
     }
 
     private static final String[] SENSITIVE_URL_KEYWORDS = {
@@ -666,6 +693,19 @@ public class MainActivity extends AppCompatActivity {
             }
 
             int status = conn.getResponseCode();
+
+            // conn.getURL() reflects the final URL after HttpURLConnection
+            // followed any redirects. If that landed on a completely
+            // different site than what was requested, this almost
+            // certainly isn't a real page from the app's own server - it's
+            // a carrier/proxy walled-garden page (e.g. "buy a data bundle")
+            // masquerading as a normal 200 response. Refuse it and serve
+            // the cached copy instead of ever showing it.
+            String finalHost = conn.getURL() != null ? conn.getURL().getHost() : null;
+            if (!isSameSiteHost(uri.getHost(), finalHost)) {
+                conn.disconnect();
+                return serveFromCacheFile(bodyFile, metaFile, uri);
+            }
 
             if (status == 304 && bodyFile.exists()) {
                 conn.disconnect();
@@ -1231,10 +1271,18 @@ public class MainActivity extends AppCompatActivity {
             OfflineQueueSync.FlushResult result = OfflineQueueSync.flush(this);
             final int finalSucceeded = result.succeeded;
             final int finalRemaining = result.remaining;
+            final String lastError = result.lastErrorMessage;
             runOnUiThread(() -> {
                 updateSyncBanner(finalRemaining);
                 if (finalSucceeded > 0) {
                     showSnackbar(finalSucceeded == 1 ? "1 saved item sent" : finalSucceeded + " saved items sent");
+                } else if (finalRemaining > 0 && lastError != null) {
+                    // Previously silent on failure - now shows exactly why so
+                    // it doesn't look like nothing happened when it actually
+                    // tried and failed (e.g. expired session, wrong URL,
+                    // server error).
+                    showSnackbar("Send failed: " + lastError);
+                    android.util.Log.w("OfflineQueue", "Flush failed: " + lastError);
                 }
                 if (finalRemaining > 0) {
                     OfflineQueueWorker.scheduleIfNeeded(getApplicationContext());
@@ -1720,13 +1768,56 @@ public class MainActivity extends AppCompatActivity {
         networkCallback = new ConnectivityManager.NetworkCallback() {
             @Override
             public void onAvailable(Network network) {
+                // Don't just assume "available" means truly online - a
+                // network can appear (radio connected) before Android has
+                // finished validating it actually reaches the internet.
+                boolean nowOnline = isOnline(cm);
                 boolean wasOffline = !isCurrentlyOnline;
-                isCurrentlyOnline = true;
+                isCurrentlyOnline = nowOnline;
                 runOnUiThread(() -> {
-                    updateOfflineBanner(true);
-                    if (wasOffline) showSnackbar("Back online");
+                    updateOfflineBanner(nowOnline);
+                    if (nowOnline && wasOffline) showSnackbar("Back online");
                 });
-                flushOfflineQueue();
+                if (nowOnline) flushOfflineQueue();
+            }
+
+            @Override
+            public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
+                // The radio connection can stay up the entire time while
+                // NET_CAPABILITY_VALIDATED silently flips - e.g. a data
+                // bundle running out mid-session, or a carrier walled
+                // garden appearing. Neither onAvailable nor onLost fires in
+                // that case since the network itself never actually
+                // connects or disconnects - this is the only callback that
+                // catches it, so the offline banner and queue reflect
+                // reality within moments instead of staying wrong until the
+                // next full network change.
+                boolean nowOnline = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+                boolean changed = nowOnline != isCurrentlyOnline;
+                boolean wasOffline = !isCurrentlyOnline;
+                isCurrentlyOnline = nowOnline;
+                if (!changed) return;
+                runOnUiThread(() -> {
+                    updateOfflineBanner(nowOnline);
+                    if (nowOnline) {
+                        if (wasOffline) showSnackbar("Back online");
+                        flushOfflineQueue();
+                    } else {
+                        cancelQueueRetry();
+                    }
+                });
+            }
+
+            @Override
+            public void onLosing(Network network, int maxMsToLive) {
+                // Android's own early warning that this network is about to
+                // go away, fired before the actual disconnect - switch to
+                // offline mode proactively instead of waiting for onLost.
+                isCurrentlyOnline = false;
+                runOnUiThread(() -> {
+                    updateOfflineBanner(false);
+                    cancelQueueRetry();
+                });
             }
 
             @Override
