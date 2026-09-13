@@ -24,6 +24,20 @@ final class OfflineQueueSync {
 
     private static final Object QUEUE_LOCK = new Object();
 
+    // Hard cap on the queue file's total size. Multipart submissions with a
+    // photo attached are base64-encoded before queuing, so without this cap
+    // a long stretch offline with several photo uploads could genuinely
+    // contribute to filling a tight hosting/device disk quota - the exact
+    // kind of problem that took down APK delivery on the server side today.
+    private static final long MAX_QUEUE_BYTES = 20L * 1024 * 1024; // 20 MB
+
+    // A double-tap on a Save/Delete button while offline would previously
+    // queue two near-identical requests, both of which replay later and can
+    // create duplicate records. Treating an identical request arriving
+    // within this window as the same tap (not a second one) fixes that
+    // without needing any change on the web-app side.
+    private static final long DUPLICATE_WINDOW_MS = 2000;
+
     private OfflineQueueSync() {
     }
 
@@ -33,10 +47,58 @@ final class OfflineQueueSync {
 
     static void queueSubmission(Context context, String json) {
         synchronized (QUEUE_LOCK) {
-            try (java.io.FileWriter writer = new java.io.FileWriter(queueFile(context), true)) {
-                writer.write(json.replace("\n", " ") + "\n");
+            try {
+                if (isDuplicateOfLast(context, json)) return;
+                enforceQueueSizeCap(context, json.length());
+                try (java.io.FileWriter writer = new java.io.FileWriter(queueFile(context), true)) {
+                    writer.write(json.replace("\n", " ") + "\n");
+                }
             } catch (Exception ignored) {
             }
+        }
+    }
+
+    private static boolean isDuplicateOfLast(Context context, String json) {
+        try {
+            List<String> lines = readQueueLines(context);
+            if (lines.isEmpty()) return false;
+            JSONObject incoming = new JSONObject(json);
+            JSONObject last = new JSONObject(lines.get(lines.size() - 1));
+            long tsDiff = Math.abs(incoming.optLong("ts", 0) - last.optLong("ts", 0));
+            if (tsDiff > DUPLICATE_WINDOW_MS) return false;
+
+            JSONArray incomingFields = incoming.optJSONArray("fields");
+            JSONArray lastFields = last.optJSONArray("fields");
+            return incoming.optString("url").equals(last.optString("url"))
+                    && incoming.optString("method").equals(last.optString("method"))
+                    && incoming.optString("enctype").equals(last.optString("enctype"))
+                    && String.valueOf(incomingFields).equals(String.valueOf(lastFields));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Evicts the oldest queued entries (rather than refusing the new one)
+     * whenever adding this submission would push the queue file over its
+     * size cap - a long offline stretch with heavy attachments should never
+     * be able to grow without bound, but the newest action a person just
+     * took is usually the one most worth keeping.
+     */
+    private static void enforceQueueSizeCap(Context context, int incomingBytes) {
+        File f = queueFile(context);
+        long currentSize = f.exists() ? f.length() : 0;
+        if (currentSize + incomingBytes <= MAX_QUEUE_BYTES) return;
+
+        try {
+            List<String> lines = readQueueLines(context);
+            long total = currentSize + incomingBytes;
+            while (!lines.isEmpty() && total > MAX_QUEUE_BYTES) {
+                String removed = lines.remove(0);
+                total -= (removed.length() + 1);
+            }
+            writeQueueLines(context, lines);
+        } catch (Exception ignored) {
         }
     }
 
