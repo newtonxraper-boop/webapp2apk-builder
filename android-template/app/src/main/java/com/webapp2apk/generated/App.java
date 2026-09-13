@@ -1,6 +1,7 @@
 package com.webapp2apk.generated;
 
 import android.app.Application;
+import android.os.Bundle;
 import com.google.firebase.FirebaseApp;
 import com.google.firebase.FirebaseOptions;
 import com.google.firebase.messaging.FirebaseMessaging;
@@ -14,15 +15,49 @@ public class App extends Application {
     public static final String FIREBASE_INSTANCE = "webapp2apk-shared";
     public static JSONObject appConfig = new JSONObject();
 
+    // Whether App Lock has already been satisfied for the app's current time
+    // in the foreground. Starts false so a lock-enabled app always challenges
+    // on its very first launch; startedActivityCount below is what flips it
+    // back to false again the moment the whole app (every one of its
+    // activities, not just MainActivity) leaves the foreground - that's the
+    // actual "the person could have handed the unlocked phone to someone
+    // else" moment App Lock exists to guard, not any single activity
+    // transition or rotation.
+    public static volatile boolean sessionUnlocked = false;
+
+    private int startedActivityCount = 0;
+
     @Override
     public void onCreate() {
         super.onCreate();
         loadAppConfig();
+        registerActivityLifecycleCallbacks(new ActivityLifecycleTracker());
         // Deferred to the next main-thread loop iteration so Firebase SDK
         // initialization never blocks the very first frame the user sees -
         // appConfig itself is still loaded synchronously above since
         // Splash/MainActivity depend on it being ready immediately.
         new android.os.Handler(android.os.Looper.getMainLooper()).post(this::maybeInitFirebase);
+    }
+
+    private final class ActivityLifecycleTracker implements ActivityLifecycleCallbacks {
+        @Override
+        public void onActivityStarted(android.app.Activity activity) {
+            startedActivityCount++;
+        }
+
+        @Override
+        public void onActivityStopped(android.app.Activity activity) {
+            startedActivityCount = Math.max(0, startedActivityCount - 1);
+            if (startedActivityCount == 0) {
+                sessionUnlocked = false;
+            }
+        }
+
+        @Override public void onActivityCreated(android.app.Activity activity, Bundle savedInstanceState) {}
+        @Override public void onActivityResumed(android.app.Activity activity) {}
+        @Override public void onActivityPaused(android.app.Activity activity) {}
+        @Override public void onActivitySaveInstanceState(android.app.Activity activity, Bundle outState) {}
+        @Override public void onActivityDestroyed(android.app.Activity activity) {}
     }
 
     private void loadAppConfig() {

@@ -85,6 +85,7 @@ public class MainActivity extends AppCompatActivity {
     private TextView updateBanner;
     private View shareButton;
     private View refreshButton;
+    private View settingsButton;
     private View syncPendingBanner;
     private TextView syncPendingText;
     private View syncPendingSendNowButton;
@@ -96,6 +97,8 @@ public class MainActivity extends AppCompatActivity {
     private ActivityResultLauncher<Intent> fileChooserLauncher;
     private ActivityResultLauncher<String[]> cameraMicPermissionLauncher;
     private ActivityResultLauncher<String> storagePermissionLauncher;
+    private ActivityResultLauncher<Intent> lockLauncher;
+    private boolean lockScreenShowing = false;
     private PermissionRequest pendingWebPermissionRequest;
     private DownloadManager.Request pendingDownloadRequest;
     private String pendingDownloadFileName;
@@ -169,6 +172,7 @@ public class MainActivity extends AppCompatActivity {
         updateBanner = findViewById(R.id.updateBanner);
         shareButton = findViewById(R.id.shareButton);
         refreshButton = findViewById(R.id.refreshButton);
+        settingsButton = findViewById(R.id.settingsButton);
         syncPendingBanner = findViewById(R.id.syncPendingBanner);
         syncPendingText = findViewById(R.id.syncPendingText);
         syncPendingSendNowButton = findViewById(R.id.syncPendingSendNowButton);
@@ -198,10 +202,12 @@ public class MainActivity extends AppCompatActivity {
         setupDownloadListener();
         setupShareButton();
         setupRefreshButton();
+        setupSettingsButton();
         setupConnectivityBanner();
         setupSwipeRefresh();
         setupBottomTabs();
         checkForAppUpdate();
+        maybeShowLockScreen();
 
         webView.loadUrl(startUrl);
     }
@@ -218,6 +224,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        maybeShowLockScreen();
         webView.onResume();
         webView.resumeTimers();
         if (prefs != null) prefs.edit().putInt("unread_notification_count", 0).apply();
@@ -331,6 +338,33 @@ public class MainActivity extends AppCompatActivity {
                     pendingDownloadRequest = null;
                     pendingDownloadFileName = null;
                 });
+
+        lockLauncher = registerForActivityResult(
+                new ActivityResultContracts.StartActivityForResult(),
+                result -> {
+                    // No explicit handling needed either way: App.sessionUnlocked is
+                    // what LockActivity actually sets on success, and the next
+                    // onResume() re-checks AppLockManager.needsUnlock() and will show
+                    // the lock screen again on its own if the person backed out of it
+                    // without unlocking.
+                    lockScreenShowing = false;
+                });
+    }
+
+    /**
+     * Shows the App Lock gate on top of the WebView content when App Lock is
+     * turned on and this session hasn't been unlocked yet. Safe to call from
+     * both onCreate() and onResume() - lockScreenShowing prevents the two
+     * from launching it twice for the same lock event, and AppLockManager
+     * itself only asks for a real unlock once per "session" (see
+     * App.sessionUnlocked).
+     */
+    private void maybeShowLockScreen() {
+        if (lockScreenShowing) return;
+        if (AppLockManager.needsUnlock(this)) {
+            lockScreenShowing = true;
+            lockLauncher.launch(new Intent(this, LockActivity.class));
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -952,8 +986,17 @@ public class MainActivity extends AppCompatActivity {
                 "    var method=(init.method||'GET').toUpperCase();" +
                 "    if(method==='GET'||!w2aIsOffline()){return originalFetch(input,init);}" +
                 "    var url=typeof input==='string'?input:input.url;" +
-                "    w2aQueueBody(url,method,init.body,'raw');" +
-                "    return Promise.reject(new Error('Offline - request queued for later'));" +
+                "    return w2aQueueBody(url,method,init.body,'raw').then(function(){" +
+                // Resolve as if the request succeeded, rather than rejecting the
+                // promise. The change is safely queued on-device and will really be
+                // sent the moment the connection comes back - from the page's point
+                // of view it should look and behave exactly like being online, with
+                // the offline banner (not a broken save/submit flow) as the only cue
+                // that anything is different.
+                "      return new Response(JSON.stringify({queued:true,offline:true})," +
+                "        {status:200,statusText:'OK (queued offline)'," +
+                "         headers:{'Content-Type':'application/json'}});" +
+                "    });" +
                 "  };" +
                 "}" +
                 "var OrigXHR=window.XMLHttpRequest;" +
@@ -976,11 +1019,19 @@ public class MainActivity extends AppCompatActivity {
                 "    var url=this.__w2aUrl||'';" +
                 "    w2aQueueBody(url,method,body,'raw').then(function(){" +
                 "      setTimeout(function(){" +
+                // Report the queued request as a normal 200 OK, not a failure - the
+                // page's existing success handling (redirects, toasts, UI updates)
+                // then runs exactly as it would online, while the real network call
+                // happens silently later once connectivity is back.
+                "        var fakeBody='{\"queued\":true,\"offline\":true}';" +
                 "        try{Object.defineProperty(self,'readyState',{value:4,configurable:true});}catch(e){}" +
-                "        try{Object.defineProperty(self,'status',{value:0,configurable:true});}catch(e){}" +
+                "        try{Object.defineProperty(self,'status',{value:200,configurable:true});}catch(e){}" +
+                "        try{Object.defineProperty(self,'statusText',{value:'OK (queued offline)',configurable:true});}catch(e){}" +
+                "        try{Object.defineProperty(self,'response',{value:fakeBody,configurable:true});}catch(e){}" +
+                "        try{Object.defineProperty(self,'responseText',{value:fakeBody,configurable:true});}catch(e){}" +
                 "        if(typeof self.onreadystatechange==='function')self.onreadystatechange();" +
-                "        if(typeof self.onerror==='function')self.onerror(new ProgressEvent('error'));" +
-                "        try{self.dispatchEvent(new ProgressEvent('error'));}catch(e){}" +
+                "        if(typeof self.onload==='function')self.onload(new ProgressEvent('load'));" +
+                "        try{self.dispatchEvent(new ProgressEvent('load'));}catch(e){}" +
                 "      },0);" +
                 "    });" +
                 "  };" +
@@ -1341,6 +1392,15 @@ public class MainActivity extends AppCompatActivity {
         });
 
         makeDraggable(refreshButton, "refresh_btn");
+    }
+
+    private void setupSettingsButton() {
+        settingsButton.setOnClickListener(v -> {
+            v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+            startActivity(new Intent(this, SettingsActivity.class));
+        });
+
+        makeDraggable(settingsButton, "settings_btn");
     }
 
     private void makeDraggable(View view, String prefsKeyPrefix) {

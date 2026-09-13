@@ -78,6 +78,9 @@ dependencies {
     implementation 'androidx.work:work-runtime:2.9.0'
     // Encrypted-at-rest storage for saved login credentials (Keystore-backed).
     implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+    // App Lock screen: fingerprint / face unlock, with the device PIN,
+    // pattern, or password as the automatic fallback.
+    implementation 'androidx.biometric:biometric:1.1.0'
 }
 
 configurations.all {
