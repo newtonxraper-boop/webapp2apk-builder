@@ -12,7 +12,7 @@ on:
         required: false
         default: 'https://example.com'
       package_name:
-        description: 'Package Name / applicationId'
+        description: 'Package Name / applicationId (e.g. com.example.myapp). Leave blank to auto-generate from App Name.'
         required: false
         default: ''
       request_id:
@@ -48,11 +48,11 @@ on:
         required: false
         default: ''
       crash_report_url:
-        description: 'Optional URL to POST crash reports to'
+        description: 'Optional URL to POST crash reports to (leave blank to disable)'
         required: false
         default: ''
       privacy_policy_url:
-        description: 'Optional URL to a privacy policy'
+        description: 'Optional URL to a privacy policy, shown once on first launch (leave blank to disable)'
         required: false
         default: ''
 
@@ -67,101 +67,6 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
-          java-version: '17'
-
-      - name: Install Pillow for icon processing
-        run: pip3 install --quiet --break-system-packages Pillow
-
-      - name: Generate app resources
-        env:
-          APP_NAME: ${{ inputs.app_name }}
-          APP_URL: ${{ inputs.app_url }}
-          PACKAGE_NAME: ${{ inputs.package_name }}
-          REQUEST_ID: ${{ inputs.request_id }}
-          ICON_URL: ${{ inputs.icon_url }}
-          PRIMARY_COLOR: ${{ inputs.primary_color }}
-          ACCENT_COLOR: ${{ inputs.accent_color }}
-          SPLASH_ENABLED: ${{ inputs.splash_enabled }}
-          PUSH_ENABLED: ${{ inputs.push_enabled }}
-          FILECAMERA_ENABLED: ${{ inputs.filecamera_enabled }}
-          NAV_ITEMS_B64: ${{ inputs.nav_items_b64 }}
-          CRASH_REPORT_URL: ${{ inputs.crash_report_url }}
-          PRIVACY_POLICY_URL: ${{ inputs.privacy_policy_url }}
-        run: python3 scripts/generate_resources.py
-
-      - name: Use release keystore from repository secrets (if configured)
-        env:
-          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: |
-          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
-            # CRITICAL FIX: Remove any accidental newlines or spaces from the Base64 string
-            CLEAN_BASE64=$(echo "$RELEASE_KEYSTORE_BASE64" | tr -d '\n\r ')
-            
-            # Decode to a file
-            echo "$CLEAN_BASE64" | base64 -d > android-template/app/release.keystore
-            
-            # Verify the file is not empty (this catches corrupted Base64)
-            if [ ! -s android-template/app/release.keystore ]; then
-              echo "ERROR: Keystore file is empty. Your Base64 secret is truncated or invalid."
-              exit 1
-            fi
-
-            echo "KEYSTORE_PATH=release.keystore" >> "$GITHUB_ENV"
-            echo "KEYSTORE_PASSWORD=$RELEASE_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
-            echo "KEY_ALIAS=$RELEASE_KEY_ALIAS" >> "$GITHUB_ENV"
-            echo "KEY_PASSWORD=$RELEASE_KEY_PASSWORD" >> "$GITHUB_ENV"
-            echo "Using the real release keystore from repository secrets."
-          else
-            echo "No RELEASE_KEYSTORE_BASE64 secret configured yet."
-            echo "Falling back to a debug keystore for now."
-          fi
-
-      - name: Generate debug keystore if missing (fallback only)
-        run: |
-          if [ -z "$KEYSTORE_PATH" ] && [ ! -f android-template/app/debug.keystore ]; then
-            keytool -genkeypair -v \
-              -keystore android-template/app/debug.keystore \
-              -storepass android -keypass android \
-              -alias androiddebugkey \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
-
-      - name: Set up Gradle 8.7
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
-
-      - name: Build Release APK
-        run: |
-          cd android-template
-          gradle assembleRelease --stacktrace
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release
-          path: android-template/app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
-
-      - name: Deliver APK to website
-        env:
-          RECEIVE_URL: ${{ secrets.RECEIVE_URL }}
-          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
-        if: env.RECEIVE_URL != ''
-        run: |
-          APK_PATH=$(find android-template/app/build/outputs/apk/release -name '*.apk' | head -n1)
-          if [ -z "$APK_PATH" ]; then
-            echo "No APK found to deliver"; exit 1
-          fi
-          curl -sS -f -X POST "$RECEIVE_URL" \
-            -F "token=$CALLBACK_SECRET" \
-            -F "request_id=${{ inputs.request_id }}" \
-            -F "apk=@${APK_PATH}"
-          echo "Delivered APK to website"          distribution: 'zulu'
           java-version: '17'
 
       - name: Install Pillow for icon processing
@@ -215,6 +120,31 @@ jobs:
             echo "Run the 'Generate Release Keystore (one-time setup)' workflow, then add the four secrets it prints - see its job summary for exact steps."
             echo "Falling back to a debug keystore for now (NOT suitable for real distribution - anyone can re-sign updates to this app)."
           fi
+
+      - name: Verify release keystore secrets match (fast pre-flight check)
+        if: env.KEYSTORE_PATH != ''
+        run: |
+          KS="android-template/app/${KEYSTORE_PATH}"
+
+          echo "Checking RELEASE_KEYSTORE_PASSWORD + RELEASE_KEYSTORE_BASE64..."
+          if ! keytool -list -storepass "$KEYSTORE_PASSWORD" -keystore "$KS" > /dev/null 2>/tmp/store_err.txt; then
+            echo "::error::RELEASE_KEYSTORE_PASSWORD does not match this keystore, or RELEASE_KEYSTORE_BASE64 is corrupted/stale. Re-copy both from the latest 'Generate Release Keystore' run and update both secrets together."
+            cat /tmp/store_err.txt
+            exit 1
+          fi
+          echo "  OK."
+
+          echo "Checking RELEASE_KEY_ALIAS + RELEASE_KEY_PASSWORD..."
+          if ! keytool -keypasswd -alias "$KEY_ALIAS" -keystore "$KS" \
+                -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" -new "$KEY_PASSWORD" \
+                > /tmp/key_err.txt 2>&1; then
+            echo "::error::RELEASE_KEY_PASSWORD does not unlock alias '$KEY_ALIAS' in this keystore (or RELEASE_KEY_ALIAS is wrong - it should be 'releasekey' unless you changed it). Re-copy RELEASE_KEY_ALIAS and RELEASE_KEY_PASSWORD exactly, with no extra spaces or newlines."
+            cat /tmp/key_err.txt
+            exit 1
+          fi
+          echo "  OK."
+
+          echo "All release signing secrets match the keystore."
 
       - name: Generate debug keystore if missing (fallback only)
         run: |
