@@ -67,6 +67,7 @@ import java.net.URL;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -87,7 +88,6 @@ public class MainActivity extends AppCompatActivity {
     private View syncPendingBanner;
     private TextView syncPendingText;
     private View syncPendingSendNowButton;
-    // (offline-queue file access is fully owned by OfflineQueueSync now)
 
     private String homeUrl;
     private boolean filecameraEnabled;
@@ -100,36 +100,22 @@ public class MainActivity extends AppCompatActivity {
     private DownloadManager.Request pendingDownloadRequest;
     private String pendingDownloadFileName;
 
-    // Exit confirmation - back press only exits if pressed twice within 2s.
     private long backPressedAt = 0;
 
-    // Offline banner tracking, debounced so a flaky connection doesn't flicker it.
     private ConnectivityManager.NetworkCallback networkCallback;
     private final android.os.Handler bannerDebounceHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private Runnable pendingBannerUpdate;
 
-    // Set when shouldInterceptRequest already confirmed nothing is cached for
-    // a same-origin URL, so onReceivedError can skip a second, pointless
-    // cache lookup and go straight to the offline page.
     private String lastConfirmedCacheMissUrl;
 
-    // Bottom nav tab bookkeeping - lets us re-tint icons/labels when the
-    // active tab changes, without rebuilding the whole bar.
     private final List<LinearLayout> tabContainers = new ArrayList<>();
     private final List<String> tabUrls = new ArrayList<>();
     private final List<GradientDrawable> tabBadgeGlow = new ArrayList<>();
     private String currentActiveUrl;
 
-    // --- Offline page cache -------------------------------------------------
-    // Every full-page navigation (not images/CSS/JS/API calls) gets saved to
-    // app-private storage. Next time that exact page is opened, we always try
-    // the network first (so you get the freshest version whenever there IS a
-    // connection), and only fall back to the last saved copy when the network
-    // request truly fails. This is what makes pages "stay on the phone" until
-    // there's an actual update.
-    private static final long MAX_CACHE_BYTES_CAP = 100L * 1024 * 1024; // never exceed 100 MB regardless of free space
-    private static final long MAX_CACHE_BYTES_FLOOR = 10L * 1024 * 1024; // always allow at least 10 MB
-    private long maxCacheBytes = 25L * 1024 * 1024; // sensible default until computed from real free space
+    private static final long MAX_CACHE_BYTES_CAP = 100L * 1024 * 1024;
+    private static final long MAX_CACHE_BYTES_FLOOR = 10L * 1024 * 1024;
+    private long maxCacheBytes = 25L * 1024 * 1024;
     private android.animation.ObjectAnimator progressPulseAnimator;
     private File offlineCacheDir;
 
@@ -141,13 +127,6 @@ public class MainActivity extends AppCompatActivity {
     private boolean shortcutsRegistered = false;
     private boolean homePrefetchTriggered = false;
 
-    // Offline-queue flush retry: Android's NetworkCallback can fire
-    // onAvailable before the connection is genuinely usable (DNS not ready,
-    // captive portal check pending), and even a "validated" network can
-    // still fail a real HTTP request once in a while. Rather than trying
-    // exactly once and giving up silently, we keep retrying on a short
-    // backoff for as long as items remain queued and we still believe we're
-    // online, and stop the moment the queue empties or the network drops.
     private final android.os.Handler queueRetryHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private Runnable pendingQueueRetry;
     private int flushRetryAttempt = 0;
@@ -163,12 +142,12 @@ public class MainActivity extends AppCompatActivity {
     private long lastDownloadTime = 0;
     private static final long DOWNLOAD_DEBOUNCE_MS = 2000;
 
-    private static final long UPDATE_CHECK_MIN_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+    private static final long UPDATE_CHECK_MIN_INTERVAL_MS = 60 * 60 * 1000;
 
     private float cachedDensity = 0f;
     private static final int MAX_CACHE_FILE_COUNT = 500;
     private long lastDragUpdateTime = 0;
-    private static final long DRAG_UPDATE_THROTTLE_MS = 16; // ~60fps
+    private static final long DRAG_UPDATE_THROTTLE_MS = 16;
     private java.util.concurrent.ExecutorService prefetchExecutor;
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -204,8 +183,6 @@ public class MainActivity extends AppCompatActivity {
         homeUrl = config.optString("app_url", getString(R.string.app_url));
         filecameraEnabled = config.optBoolean("filecamera_enabled", true);
 
-        // A home-screen shortcut launches MainActivity with this extra set to
-        // jump straight to that tab's URL instead of the usual home page.
         String shortcutUrl = getIntent() != null ? getIntent().getStringExtra("shortcut_url") : null;
         String startUrl = (shortcutUrl != null && !shortcutUrl.isEmpty()) ? shortcutUrl : homeUrl;
         currentActiveUrl = startUrl;
@@ -214,8 +191,6 @@ public class MainActivity extends AppCompatActivity {
         if (!offlineCacheDir.exists()) offlineCacheDir.mkdirs();
         maxCacheBytes = computeCacheSizeLimit();
         prefs = getSharedPreferences("webapp2apk_prefs", MODE_PRIVATE);
-        // Queue file lives under OfflineQueueSync now (shared with the
-        // background Worker) - nothing to initialize here.
 
         setupActivityResultLaunchers();
         setupWebView();
@@ -234,18 +209,9 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         super.onPause();
-        // Stops JS timers, animations, and any playing video/audio while
-        // backgrounded instead of letting the WebView keep running invisibly -
-        // real battery/CPU savings, not just a formality.
         webView.onPause();
         webView.pauseTimers();
-        // Final safety net so a session cookie set right before the user
-        // backgrounds or closes the app is durably saved, not just held in
-        // memory waiting for the system's own periodic flush.
         CookieManager.getInstance().flush();
-        // If anything is still queued the moment the app goes to the
-        // background, make sure an OS-scheduled retry is in place - the
-        // in-app retry/Handler path stops the instant this process dies.
         OfflineQueueWorker.scheduleIfNeeded(getApplicationContext());
     }
 
@@ -255,11 +221,6 @@ public class MainActivity extends AppCompatActivity {
         webView.onResume();
         webView.resumeTimers();
         if (prefs != null) prefs.edit().putInt("unread_notification_count", 0).apply();
-        // Safety net: some OEMs (aggressive battery savers, certain Xiaomi/
-        // Samsung builds) can suppress NetworkCallback delivery in the
-        // background. Re-checking here means coming back to the app is
-        // always another chance to notice "we're online and something's
-        // still queued" even if the callback never fired.
         ConnectivityManager resumeCm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         if (resumeCm != null) {
             boolean nowOnline = isOnline(resumeCm);
@@ -311,14 +272,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Tints the phone's status bar and system navigation bar to match the
-     * app's own theme color instead of leaving them plain black/white. This
-     * is what makes the app boundary feel seamless with your site's own
-     * header/footer, the way every polished native app does, rather than
-     * looking like a plain browser window with mismatched OS chrome above
-     * and below it.
-     */
     private void applyImmersiveTheming() {
         int chromeColor = ContextCompat.getColor(this, R.color.primary_dark_color);
         Window window = getWindow();
@@ -395,46 +348,16 @@ public class MainActivity extends AppCompatActivity {
         settings.setAllowFileAccess(true);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // Tells Android not to deprioritize this WebView's renderer under
-            // memory pressure while the app is in the foreground.
             webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true);
         }
 
-        // Pre-rasters content just outside the visible viewport for smoother
-        // scrolling, at the cost of a little extra memory - a good trade for
-        // a foreground app.
         settings.setOffscreenPreRaster(true);
-
-        // Hardware-accelerate the WebView explicitly rather than relying on
-        // whatever layer type the platform defaults to.
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
 
-        // Exposes enqueue() to JavaScript so the injected offline-queue shim
-        // (see injectOfflineQueueScript) can hand off form submissions/uploads
-        // made while offline for native code to store and later replay.
         webView.addJavascriptInterface(new OfflineQueueBridge(), "AndroidOfflineQueue");
-
-        // Exposes retry() to offline.html's own "Try again" button. Without
-        // this, that button (and the native refresh button below) just
-        // reloaded offline.html itself - a bundled local file that always
-        // "succeeds" instantly, so it looked like refresh "did nothing" and
-        // connectivity was never actually rechecked or the real page retried.
         webView.addJavascriptInterface(new RetryBridge(), "AndroidRetry");
-
-        // Exposes capture()/getSaved() to the login-autofill shim in
-        // injectOfflineQueueScript, backed by CredentialVault (encrypted at
-        // rest). This is the actual "stay signed in like WhatsApp" feature -
-        // it doesn't change how long the server's own session lasts, but it
-        // means the app can silently log back in on your behalf the moment
-        // it notices a login page, instead of ever showing you one.
         webView.addJavascriptInterface(new CredentialBridge(), "AndroidCredentials");
 
-        // Makes sure a logged-in session actually survives closing and
-        // reopening the app, instead of asking the user to sign in every
-        // time. Cookies persist to disk by default, but are only flushed to
-        // disk periodically by the system - explicit flushes (below, and in
-        // onPause()) make sure a freshly-established login session is saved
-        // promptly rather than risking loss if the app process gets killed.
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
         cookieManager.setAcceptThirdPartyCookies(webView, true);
@@ -442,10 +365,6 @@ public class MainActivity extends AppCompatActivity {
         swipeRefresh.setColorSchemeColors(ContextCompat.getColor(this, R.color.accent_color));
 
         webView.setWebViewClient(new WebViewClient() {
-            // Secondary safety net: if a page still fails after our own
-            // shouldInterceptRequest cache attempt (e.g. this was a non-GET or
-            // cross-origin request WebView handled itself), try once more with
-            // WebView's own disk cache before giving up entirely.
             private boolean cacheRetryInProgress = false;
 
             @Override
@@ -461,16 +380,9 @@ public class MainActivity extends AppCompatActivity {
                 if (scheme == null) return false;
 
                 if (!scheme.equals("http") && !scheme.equals("https")) {
-                    // tel:, mailto:, whatsapp:, intent:, market:, upi:, etc. -
-                    // always hand off to whatever app the OS has for it.
                     return openExternally(uri);
                 }
 
-                // An explicit logout is the one moment auto-login must NOT
-                // kick in - otherwise tapping "log out" would immediately
-                // sign the person straight back in, which would just look
-                // broken. Forgetting the saved credentials here is also
-                // exactly what "stay signed in until I log out" means.
                 String path = uri.getPath();
                 if (path != null && path.toLowerCase().contains("logout")) {
                     CredentialVault.clear(getApplicationContext());
@@ -480,14 +392,9 @@ public class MainActivity extends AppCompatActivity {
 
                 Uri homeUri = Uri.parse(homeUrl);
                 if (homeUri.getHost() != null && homeUri.getHost().equalsIgnoreCase(uri.getHost())) {
-                    return false; // same site - handle it inside the app as normal
+                    return false;
                 }
 
-                // A different domain - most commonly a Google/OAuth login screen
-                // or a Mobile Money payment gateway redirect, both of which are
-                // frequently blocked or broken inside a plain embedded WebView.
-                // Hand off to the phone's real browser/app instead of trapping
-                // the user on a page that may not even let them proceed.
                 return openExternally(uri);
             }
 
@@ -500,9 +407,6 @@ public class MainActivity extends AppCompatActivity {
                 view.animate().cancel();
                 view.setAlpha(0.3f);
 
-                // Deferred here (rather than during onCreate) so shortcut
-                // registration never competes with the WebView for CPU time
-                // while the critical first page is loading.
                 if (!shortcutsRegistered) {
                     shortcutsRegistered = true;
                     setupHomeScreenShortcuts();
@@ -514,23 +418,10 @@ public class MainActivity extends AppCompatActivity {
                 super.onReceivedError(view, request, error);
                 if (!request.isForMainFrame()) return;
 
-                // Ask real connectivity directly instead of assuming any
-                // onReceivedError means the network is down. WebView fires
-                // this for plenty of non-connectivity reasons too - most
-                // commonly ERR_CACHE_MISS when reloading a page that was
-                // originally reached via POST (exactly what a Save/Delete/
-                // Add button does), which was previously being misread as
-                // "offline", wrongly flipping the banner on and reloading a
-                // POST target as a plain GET - producing a page that visibly
-                // reloads but silently does nothing.
                 ConnectivityManager cmCheck = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
                 boolean actuallyOffline = cmCheck == null || !isOnline(cmCheck);
 
                 if (!actuallyOffline) {
-                    // A real page/server error while genuinely online (a
-                    // benign WebView quirk, an HTTP 4xx/5xx, etc.) - leave it
-                    // to WebView's own default handling rather than treating
-                    // it as a connectivity problem.
                     return;
                 }
 
@@ -556,24 +447,12 @@ public class MainActivity extends AppCompatActivity {
                 super.onPageFinished(view, url);
                 swipeRefresh.setRefreshing(false);
 
-                // A login page navigating away to a non-login page is the
-                // strongest signal we get that a session cookie was just
-                // freshly issued. Force an immediate, un-throttled flush
-                // right then, rather than trusting the normal periodic
-                // throttle - if the app gets killed in the next second or
-                // two, that's the difference between the login actually
-                // sticking and the user being asked to sign in again next
-                // open for no visible reason.
                 Uri currentUri = url != null ? Uri.parse(url) : null;
                 boolean cameFromLogin = lastPageUrl != null && isSensitiveUrl(Uri.parse(lastPageUrl));
                 boolean nowOnNonLoginPage = currentUri == null || !isSensitiveUrl(currentUri);
                 if (cameFromLogin && nowOnNonLoginPage) {
                     CookieManager.getInstance().flush();
                     lastCookieFlushTime = System.currentTimeMillis();
-                    // Only now, once we can see the login actually worked (it
-                    // moved on to a real page), is it safe to persist what
-                    // was captured at submit time - never save a login that
-                    // may have just failed.
                     if (pendingCredentials != null) {
                         CredentialVault.save(getApplicationContext(), pendingCredentials[0], pendingCredentials[1]);
                         pendingCredentials = null;
@@ -585,12 +464,6 @@ public class MainActivity extends AppCompatActivity {
 
                 injectOfflineQueueScript(view, url);
 
-                // postVisualStateCallback fires once the page is actually
-                // painted on screen, which can be a moment after
-                // onPageFinished (DOM-complete) fires - hiding the spinner
-                // here instead avoids revealing a still-blank frame. A
-                // fallback timeout guards against the callback never firing
-                // on some WebView versions, so the spinner can't get stuck.
                 final long visualStateRequestId = System.currentTimeMillis();
                 final boolean[] revealed = {false};
                 Runnable reveal = () -> {
@@ -625,10 +498,6 @@ public class MainActivity extends AppCompatActivity {
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onProgressChanged(WebView view, int newProgress) {
-                // Loading feedback is shown as a centered spinner via
-                // WebViewClient.onPageStarted/onPageFinished instead of a
-                // percentage bar, so there's nothing to update here besides
-                // making sure the pull-to-refresh spinner stops.
                 if (newProgress >= 100) swipeRefresh.setRefreshing(false);
             }
 
@@ -668,13 +537,6 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    /**
-     * Tries the network first (always, so content is fresh whenever there's a
-     * connection) and saves a successful response to disk. If the network
-     * request fails, falls back to the last saved copy of that exact page, if
-     * one exists. Returns null if nothing can be served (lets WebView's normal
-     * error handling / offline.html fallback take over).
-     */
     private WebResourceResponse maybeServeFromOfflineCache(WebResourceRequest request) {
         if (!"GET".equalsIgnoreCase(request.getMethod())) return null;
 
@@ -684,23 +546,13 @@ public class MainActivity extends AppCompatActivity {
 
         Uri homeUri = Uri.parse(homeUrl);
         if (homeUri.getHost() == null || !homeUri.getHost().equalsIgnoreCase(uri.getHost())) {
-            // Only cache pages on the app's own domain.
             return null;
         }
 
         if (isSensitiveUrl(uri)) {
-            // Login/checkout/payment-style pages shouldn't be cached or
-            // replayed offline - let WebView handle these completely normally.
             return null;
         }
 
-        // Only take over the request when genuinely offline. When online,
-        // this returns null and WebView's own native networking handles the
-        // request completely normally - identical to a real browser, with
-        // zero risk of interfering with cookies or session state. The page
-        // still gets cached for offline use afterward, just passively in the
-        // background (see onPageFinished) rather than by hijacking the live
-        // request itself.
         if (!isCurrentlyOnline) {
             String cacheKey = sha256(uri.toString());
             File bodyFile = new File(offlineCacheDir, cacheKey + ".body.gz");
@@ -725,15 +577,6 @@ public class MainActivity extends AppCompatActivity {
         return false;
     }
 
-    /**
-     * Fetches a URL fresh over the network (sending along any previously
-     * cached ETag/Last-Modified so an unchanged page gets back a cheap 304
-     * instead of the full body again), writes the result to the offline
-     * cache, and returns it as a WebResourceResponse. Falls back to whatever
-     * is already cached if the network attempt fails outright. Also used
-     * for background tab prefetching, where the returned response is simply
-     * discarded - the point there is only the cache-write side effect.
-     */
     private WebResourceResponse fetchAndCache(Uri uri, File bodyFile, File metaFile) {
         try {
             HttpURLConnection conn = (HttpURLConnection) new URL(uri.toString()).openConnection();
@@ -757,9 +600,6 @@ public class MainActivity extends AppCompatActivity {
             int status = conn.getResponseCode();
 
             if (status == 304 && bodyFile.exists()) {
-                // Server confirms nothing changed - reuse the cached body
-                // instead of downloading it again, and touch its timestamp so
-                // LRU cache eviction still treats it as recently used.
                 conn.disconnect();
                 bodyFile.setLastModified(System.currentTimeMillis());
                 return serveFromCacheFile(bodyFile, metaFile, uri);
@@ -801,12 +641,14 @@ public class MainActivity extends AppCompatActivity {
                 writeFileQuietly(metaFile, buildMetaString(mimeType, encoding, etag, lastModified).getBytes("UTF-8"));
                 maybeEnforceCacheSizeLimit();
 
-                return new WebResourceResponse(mimeType, encoding, new ByteArrayInputStream(data));
+                Map<String, String> responseHeaders = new HashMap<>();
+                responseHeaders.put("Cache-Control", "no-store");
+                return new WebResourceResponse(mimeType, encoding, 200, "OK",
+                        responseHeaders, new ByteArrayInputStream(data));
             } else {
                 conn.disconnect();
             }
         } catch (Exception networkFailed) {
-            // fall through to the cached copy below
         }
 
         return serveFromCacheFile(bodyFile, metaFile, uri);
@@ -817,7 +659,7 @@ public class MainActivity extends AppCompatActivity {
         try {
             String meta = new String(readAllBytes(new FileInputStream(metaFile)), "UTF-8");
             String[] parts = meta.split("\\|", -1);
-            String[] result = new String[4]; // mimeType, encoding, etag, lastModified
+            String[] result = new String[4];
             for (int i = 0; i < 4; i++) result[i] = i < parts.length ? parts[i] : "";
             return result;
         } catch (Exception e) {
@@ -835,11 +677,10 @@ public class MainActivity extends AppCompatActivity {
                 String[] meta = readMetaParts(metaFile);
                 String mimeType = meta != null && !meta[0].isEmpty() ? meta[0] : "text/html";
                 String encoding = meta != null && !meta[1].isEmpty() ? meta[1] : "UTF-8";
-                // Streamed straight from disk rather than buffered fully into
-                // memory first - matters most on low-RAM phones with larger
-                // cached pages.
                 InputStream stream = new java.util.zip.GZIPInputStream(new FileInputStream(bodyFile));
-                return new WebResourceResponse(mimeType, encoding, stream);
+                Map<String, String> headers = new HashMap<>();
+                headers.put("Cache-Control", "no-store");
+                return new WebResourceResponse(mimeType, encoding, 200, "OK", headers, stream);
             } catch (Exception ignored) {
                 lastConfirmedCacheMissUrl = uri.toString();
                 return null;
@@ -866,11 +707,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Cached pages are stored gzip-compressed on disk (HTML/JSON/text
-     * typically shrinks 60-80%), so the same storage budget holds noticeably
-     * more pages and each read is a smaller disk operation.
-     */
     private static void writeGzipFileQuietly(File file, byte[] data) {
         try (FileOutputStream fos = new FileOutputStream(file);
              java.util.zip.GZIPOutputStream gzos = new java.util.zip.GZIPOutputStream(fos)) {
@@ -891,10 +727,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Scanning the whole cache directory on every single write is wasteful -
-     * only actually check/enforce the size limit every 5th write.
-     */
     private void maybeEnforceCacheSizeLimit() {
         cacheWriteCountSinceLastScan++;
         if (cacheWriteCountSinceLastScan < 5) return;
@@ -924,16 +756,11 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Uses 5% of the device's free internal storage as the offline cache
-     * budget, bounded between 10MB and 100MB, instead of one fixed number
-     * that could be wasteful on a spacious phone or too greedy on a nearly-full one.
-     */
     private long computeCacheSizeLimit() {
         try {
             android.os.StatFs stat = new android.os.StatFs(getFilesDir().getPath());
             long freeBytes = stat.getAvailableBytes();
-            long budget = freeBytes / 20; // 5%
+            long budget = freeBytes / 20;
             return Math.max(MAX_CACHE_BYTES_FLOOR, Math.min(MAX_CACHE_BYTES_CAP, budget));
         } catch (Exception e) {
             return MAX_CACHE_BYTES_FLOOR;
@@ -941,42 +768,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setupSwipeRefresh() {
-        // Pull-to-refresh-by-scrolling can't reliably tell "scrolling inside
-        // a chat panel/message list/other internally-scrolling container"
-        // apart from "pulling down to refresh the whole page" - the outer
-        // WebView's scroll position doesn't change at all in the former case,
-        // so no scroll-position check can fix it. Disabled entirely in favor
-        // of an explicit refresh button (see setupRefreshButton), which has
-        // no such ambiguity on any page.
         swipeRefresh.setEnabled(false);
     }
-
-    // ==========================================================================
-    // Offline write queue: lets forms and uploads made while offline (text,
-    // settings, comments, photos) get saved on the phone and automatically
-    // sent once a connection returns - the user never sees an error, and
-    // never has to redo anything.
-    //
-    // How it works: a small JS shim (below) is injected into every page. It
-    // watches form submissions and fetch() calls; when one happens while
-    // offline, instead of letting it fail, the shim serializes the fields
-    // (including small files as base64) and hands them to this native code
-    // via the AndroidOfflineQueue JS bridge. They're stored in a local file
-    // and replayed for real - as actual HTTP requests, using whatever
-    // cookies are current at send time - the moment the app detects the
-    // network is back.
-    //
-    // Real limit worth knowing: the JS-to-native bridge that carries queued
-    // data has a practical size ceiling (large payloads risk a hard Android
-    // platform crash, TransactionTooLargeException). Rather than raising this
-    // number, oversized *image* files are downscaled/re-encoded to JPEG on
-    // the page side (canvas-based, a few hundred KB for a typical 3-8MB phone
-    // camera photo with no visible quality loss) before the size check runs,
-    // so a real photo almost never gets dropped. A file that still doesn't
-    // fit after compression (or isn't an image at all, e.g. a large video) is
-    // flagged as too large to queue rather than risking that crash - large
-    // video uploads made while offline are still not supported.
-    // ==========================================================================
 
     private static final long MAX_QUEUEABLE_FILE_BYTES = 4L * 1024 * 1024;
 
@@ -995,9 +788,6 @@ public class MainActivity extends AppCompatActivity {
                 "if(window.__w2aQueueInstalled)return;" +
                 "window.__w2aQueueInstalled=true;" +
                 "var MAX_FILE_BYTES=" + MAX_QUEUEABLE_FILE_BYTES + ";" +
-                // Separate, smaller target for the online-upload path below -
-                // this one is about upload speed/data savings on a normal
-                // connection, not the offline bridge's hard safety ceiling.
                 "var ONLINE_COMPRESS_THRESHOLD_BYTES=600*1024;" +
                 "var ONLINE_TARGET_BYTES=900*1024;" +
                 "function fileToBase64(blob){" +
@@ -1008,10 +798,6 @@ public class MainActivity extends AppCompatActivity {
                 "    reader.readAsDataURL(blob);" +
                 "  });" +
                 "}" +
-                // Downscales/re-encodes an image File to JPEG at the given max
-                // dimension/quality via an offscreen canvas. Falls back to the
-                // original file (never throws) if decoding fails for any
-                // reason - callers treat the result as "best effort".
                 "function compressImageOnce(file,maxDim,quality){" +
                 "  return new Promise(function(resolve){" +
                 "    var url;" +
@@ -1034,10 +820,6 @@ public class MainActivity extends AppCompatActivity {
                 "    img.src=url;" +
                 "  });" +
                 "}" +
-                // Tries progressively smaller/lower-quality passes until the
-                // result fits MAX_FILE_BYTES (or we run out of attempts), so a
-                // normal 3-8MB phone camera photo reliably ends up a few
-                // hundred KB instead of being dropped for being oversized.
                 "function compressImageUntilFits(file,maxBytes){" +
                 "  var attempts=[[1600,0.82],[1280,0.72],[1024,0.62],[800,0.55]];" +
                 "  var i=0,best=file;" +
@@ -1082,9 +864,6 @@ public class MainActivity extends AppCompatActivity {
                 "  }" +
                 "  return false;" +
                 "}" +
-                // Prefer the native, authoritative connectivity check over
-                // navigator.onLine, which can stay stuck "true" in a WebView
-                // even after the device genuinely loses its connection.
                 "function w2aIsOffline(){" +
                 "  if(window.AndroidOfflineQueue&&window.AndroidOfflineQueue.isOnline){" +
                 "    try{return !window.AndroidOfflineQueue.isOnline();}catch(e){}" +
@@ -1108,11 +887,6 @@ public class MainActivity extends AppCompatActivity {
                 "    });" +
                 "    return;" +
                 "  }" +
-                // Online path: this doesn't touch queueing at all - the form
-                // still submits normally through the browser. It just
-                // shrinks any sizeable photo first, so a normal online photo
-                // upload is faster and uses less data on a weak connection,
-                // the same way the offline-queue path already did.
                 "  var fileInputs=form.querySelectorAll('input[type=file]');" +
                 "  var toCompress=[];" +
                 "  fileInputs.forEach(function(input){" +
@@ -1145,19 +919,9 @@ public class MainActivity extends AppCompatActivity {
                 "      }" +
                 "      input.files=dt.files;" +
                 "    });" +
-                // form.submit() (unlike requestSubmit()) does not re-dispatch
-                // the 'submit' event, so this can't loop back into this same
-                // handler - it goes straight to a normal browser submission.
                 "    form.submit();" +
                 "  }).catch(function(){form.submit();});" +
                 "},true);" +
-                // Shared helper: turns any of the three body shapes real app
-                // code actually sends (FormData, URLSearchParams, or a plain
-                // string) into the same {key,type,value/data} field list the
-                // native replay logic expects, then queues it and fires the
-                // "saved for later" callback. Returns a Promise so callers
-                // can wait for file-to-base64 conversion (FormData case)
-                // before moving on.
                 "function w2aQueueBody(url,method,body,fallbackEnctype){" +
                 "  var p;" +
                 "  if(typeof FormData!=='undefined'&&body instanceof FormData){" +
@@ -1192,10 +956,6 @@ public class MainActivity extends AppCompatActivity {
                 "    return Promise.reject(new Error('Offline - request queued for later'));" +
                 "  };" +
                 "}" +
-                // Most PHP/jQuery apps submit AJAX via XMLHttpRequest, not
-                // fetch - without this, those submissions were falling
-                // straight through to the network while offline, failing
-                // silently, and never reaching the queue at all.
                 "var OrigXHR=window.XMLHttpRequest;" +
                 "if(OrigXHR){" +
                 "  var origOpen=OrigXHR.prototype.open;" +
@@ -1215,11 +975,6 @@ public class MainActivity extends AppCompatActivity {
                 "    if(method==='GET'||!w2aIsOffline()){return origSend.apply(this,arguments);}" +
                 "    var url=this.__w2aUrl||'';" +
                 "    w2aQueueBody(url,method,body,'raw').then(function(){" +
-                // Simulate the same failed-request state a real dropped
-                // connection would produce, asynchronously, so any app code
-                // waiting on onload/onreadystatechange/onerror behaves the
-                // way it already does today instead of hanging forever -
-                // the data itself is safely queued regardless.
                 "      setTimeout(function(){" +
                 "        try{Object.defineProperty(self,'readyState',{value:4,configurable:true});}catch(e){}" +
                 "        try{Object.defineProperty(self,'status',{value:0,configurable:true});}catch(e){}" +
@@ -1230,14 +985,6 @@ public class MainActivity extends AppCompatActivity {
                 "    });" +
                 "  };" +
                 "}" +
-                // Login persistence: if this page has a password field, try
-                // auto-filling+submitting any saved credentials once (so a
-                // forced-out session gets silently re-authenticated instead
-                // of showing the person a login screen), and separately
-                // capture whatever's typed on a manual submit so a fresh or
-                // changed login gets saved for next time. Native code only
-                // actually persists a capture once it confirms (on the next
-                // page) that the login succeeded.
                 "(function(){" +
                 "  var pwField=document.querySelector('input[type=password]');" +
                 "  if(!pwField)return;" +
@@ -1284,18 +1031,6 @@ public class MainActivity extends AppCompatActivity {
         view.evaluateJavascript(script, null);
     }
 
-    /**
-     * Exposed to page JavaScript as window.AndroidOfflineQueue. Both methods
-     * are called from the WebView's own thread, not necessarily the main
-     * thread, so UI updates are posted back via runOnUiThread.
-     */
-    /**
-     * Called from offline.html's "Try again" button. Does a real, fresh
-     * connectivity re-check (not the possibly-stale isCurrentlyOnline flag)
-     * and, if the page currently on screen is the offline placeholder,
-     * reloads the actual page the user originally wanted instead of just
-     * reloading the placeholder itself.
-     */
     private class RetryBridge {
         @android.webkit.JavascriptInterface
         public void retry() {
@@ -1303,12 +1038,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Re-checks real connectivity right now and reloads whatever the user
-     * actually meant to see - the last real page that failed, if that's
-     * what's currently showing the offline placeholder, otherwise just the
-     * current page.
-     */
     private void attemptRealRefresh() {
         ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         boolean nowOnline = cm != null && isOnline(cm);
@@ -1330,12 +1059,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Backs the login-autofill/capture shim injected into every page.
-     * getSaved() is called synchronously from JS and returns straight away -
-     * addJavascriptInterface methods support a real return value, unlike a
-     * postMessage-style bridge.
-     */
     private class CredentialBridge {
         @android.webkit.JavascriptInterface
         public void capture(String username, String password) {
@@ -1345,9 +1068,6 @@ public class MainActivity extends AppCompatActivity {
         @android.webkit.JavascriptInterface
         public String getSaved() {
             if (skipAutoLoginOnce) {
-                // Consumed once: the person just tapped logout, so the very
-                // next login page they land on should NOT be auto-filled -
-                // that would make logout look broken.
                 skipAutoLoginOnce = false;
                 return null;
             }
@@ -1370,15 +1090,6 @@ public class MainActivity extends AppCompatActivity {
             queueSubmission(json);
         }
 
-        /**
-         * Synchronous, authoritative connectivity check for the page JS to
-         * use instead of navigator.onLine. navigator.onLine inside an
-         * Android WebView frequently doesn't track real connectivity - it
-         * can stay "true" after the device actually loses its connection -
-         * which was silently swallowing offline submissions instead of
-         * queuing them (the request would be attempted, fail, and never
-         * get written to the queue file at all).
-         */
         @android.webkit.JavascriptInterface
         public boolean isOnline() {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
@@ -1391,9 +1102,6 @@ public class MainActivity extends AppCompatActivity {
                 updateSyncBanner(getQueueSize());
                 showSnackbar("Saved - will send once you're back online");
             });
-            // Schedules the OS-managed background retry too, not just the
-            // in-app one - guarantees this still gets sent even if the app
-            // is closed before connectivity returns.
             OfflineQueueWorker.scheduleIfNeeded(getApplicationContext());
         }
     }
@@ -1419,13 +1127,6 @@ public class MainActivity extends AppCompatActivity {
         syncPendingBanner.setVisibility(View.VISIBLE);
     }
 
-    /**
-     * The "Send now" button on the sync banner. This can't literally send
-     * data with zero network path - what it actually does is what the
-     * person means by it in practice: stop waiting for the automatic
-     * backoff timer and try this very instant, which matters most right
-     * when they've just watched their signal bars come back.
-     */
     private void forceSendQueueNow() {
         ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         boolean nowOnline = cm != null && isOnline(cm);
@@ -1440,13 +1141,6 @@ public class MainActivity extends AppCompatActivity {
         flushOfflineQueue();
     }
 
-    /**
-     * Attempts an immediate foreground flush, for fast visible feedback
-     * while the app is open. OfflineQueueWorker (scheduled alongside this)
-     * is the actual reliability backstop - it keeps retrying in the
-     * background via the OS even if the app gets closed before this
-     * finishes or before connectivity returns.
-     */
     private void flushOfflineQueue() {
         new Thread(() -> {
             OfflineQueueSync.FlushResult result = OfflineQueueSync.flush(this);
@@ -1467,11 +1161,6 @@ public class MainActivity extends AppCompatActivity {
         }).start();
     }
 
-    /**
-     * Schedules another flush attempt on a short backoff. Safe to call
-     * repeatedly - each call replaces any pending retry rather than stacking
-     * them up.
-     */
     private void scheduleQueueRetry() {
         cancelQueueRetryCallbackOnly();
         int idx = Math.min(flushRetryAttempt, FLUSH_RETRY_DELAYS_MS.length - 1);
@@ -1483,7 +1172,6 @@ public class MainActivity extends AppCompatActivity {
         queueRetryHandler.postDelayed(pendingQueueRetry, delay);
     }
 
-    /** Cancels any pending retry and resets the backoff back to the start. */
     private void cancelQueueRetry() {
         cancelQueueRetryCallbackOnly();
         flushRetryAttempt = 0;
@@ -1496,12 +1184,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Cookies get flushed to disk on essentially every page load; throttling
-     * that avoids redundant disk writes when a user is navigating quickly
-     * from page to page. onPause() still always flushes unconditionally as a
-     * final safety net regardless of this throttle.
-     */
     private void maybeFlushCookies() {
         long now = System.currentTimeMillis();
         if (now - lastCookieFlushTime < COOKIE_FLUSH_MIN_INTERVAL_MS) return;
@@ -1509,20 +1191,6 @@ public class MainActivity extends AppCompatActivity {
         CookieManager.getInstance().flush();
     }
 
-    /**
-     * Called after a page has already loaded natively (successfully, with
-     * correct cookies/session handling since WebView did it itself). Fetches
-     * a copy of that same URL again in the background purely to populate the
-     * offline cache for later - completely separate from, and after, what the
-     * user is currently looking at, so it can never affect the live page.
-     *
-     * Deliberately NOT gated behind shouldDoBackgroundWork() (unlike
-     * prefetchNavTabs) - this is the core offline-caching mechanism, and
-     * skipping it on cellular would mean offline access barely works at all
-     * for anyone who isn't usually on WiFi. It costs roughly the same data as
-     * the page the user already just loaded, not "extra" pages they may
-     * never visit.
-     */
     private void cachePageInBackground(String urlString) {
         try {
             Uri uri = Uri.parse(urlString);
@@ -1543,11 +1211,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Background caching/prefetch only runs on an unmetered (WiFi) connection
-     * and when the phone isn't in battery saver mode - it's a nice-to-have,
-     * not worth spending someone's mobile data allowance or battery on.
-     */
     private boolean shouldDoBackgroundWork() {
         ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         if (cm == null) return false;
@@ -1562,13 +1225,6 @@ public class MainActivity extends AppCompatActivity {
         return !batterySaver;
     }
 
-    /**
-     * Once the home page has loaded, quietly warms the offline cache for the
-     * other bottom-nav tabs in the background (on WiFi only, battery saver
-     * permitting), so switching to them feels instant instead of triggering
-     * a fresh load the first time each is tapped. Runs on a small thread
-     * pool so multiple tabs warm up concurrently rather than one at a time.
-     */
     private void prefetchNavTabs() {
         if (tabUrls.isEmpty() || !shouldDoBackgroundWork()) return;
         final List<String> urlsToPrefetch = new ArrayList<>(tabUrls);
@@ -1588,17 +1244,11 @@ public class MainActivity extends AppCompatActivity {
                     File metaFile = new File(offlineCacheDir, cacheKey + ".meta");
                     fetchAndCache(uri, bodyFile, metaFile);
                 } catch (Exception ignored) {
-                    // A prefetch failing for one tab shouldn't affect the others.
                 }
             });
         }
     }
 
-    /**
-     * A gentle breathing effect on the loading spinner while a page loads -
-     * a lightweight stand-in for a true content-shaped skeleton screen, which
-     * isn't really possible generically since every site's layout is different.
-     */
     private void startProgressPulse() {
         if (progressPulseAnimator != null) progressPulseAnimator.cancel();
         progressPulseAnimator = android.animation.ObjectAnimator.ofFloat(progressBar, "alpha", 1f, 0.35f, 1f);
@@ -1615,17 +1265,11 @@ public class MainActivity extends AppCompatActivity {
         progressBar.setAlpha(1f);
     }
 
-    /**
-     * WebView can't download files on its own (PDFs, receipts, certificates
-     * a site links to just silently fail without this) - route them through
-     * Android's own DownloadManager instead, which shows a real system
-     * notification and saves to the phone's Downloads folder.
-     */
     private void setupDownloadListener() {
         webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
             long now = System.currentTimeMillis();
             if (url.equals(lastDownloadUrl) && (now - lastDownloadTime) < DOWNLOAD_DEBOUNCE_MS) {
-                return; // duplicate tap on the same link - ignore
+                return;
             }
             lastDownloadUrl = url;
             lastDownloadTime = now;
@@ -1671,12 +1315,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * The share button is draggable so it can be moved out of the way of any
-     * floating buttons the website itself already has in that corner (chat
-     * widgets, "add to cart" bubbles, etc.) - a tap still shares the page;
-     * only a real drag moves it. Position is remembered between app opens.
-     */
     private void setupShareButton() {
         shareButton.setOnClickListener(v -> {
             v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
@@ -1696,12 +1334,6 @@ public class MainActivity extends AppCompatActivity {
         makeDraggable(shareButton, "share_btn");
     }
 
-    /**
-     * The explicit replacement for pull-to-refresh: unlike a scroll gesture,
-     * a dedicated tap target has no ambiguity on any page, including ones
-     * with their own internally-scrolling content (chat interfaces, message
-     * lists, etc.) where no scroll-position check could ever work reliably.
-     */
     private void setupRefreshButton() {
         refreshButton.setOnClickListener(v -> {
             v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
@@ -1711,12 +1343,6 @@ public class MainActivity extends AppCompatActivity {
         makeDraggable(refreshButton, "refresh_btn");
     }
 
-    /**
-     * Shared drag-to-reposition behavior for the small floating buttons
-     * (share, refresh) - a tap still fires the click listener; only an
-     * actual drag moves the button. Position is remembered per-button
-     * between app opens.
-     */
     private void makeDraggable(View view, String prefsKeyPrefix) {
         if (prefs.contains(prefsKeyPrefix + "_x")) {
             view.post(() -> {
@@ -1789,22 +1415,12 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Sets the WebView's background to match the phone's system dark/light
-     * mode before any page loads, so there's no jarring white flash while
-     * the real page content is still loading in.
-     */
     private void applySystemThemeBackground() {
         int uiMode = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
         boolean isDarkMode = uiMode == Configuration.UI_MODE_NIGHT_YES;
         webView.setBackgroundColor(isDarkMode ? Color.parseColor("#171A21") : Color.WHITE);
     }
 
-    /**
-     * Builds home-screen long-press shortcuts from the same nav_items.json
-     * used for the bottom tab bar, so users can jump straight to a section
-     * without opening the app to its home page first.
-     */
     private void setupHomeScreenShortcuts() {
         try {
             JSONArray navItems = loadNavItems();
@@ -1838,16 +1454,9 @@ public class MainActivity extends AppCompatActivity {
                 ShortcutManagerCompat.setDynamicShortcuts(this, shortcuts);
             }
         } catch (Exception ignored) {
-            // Shortcuts are a nice-to-have - never let a failure here affect the app itself.
         }
     }
 
-    /**
-     * A different hue per shortcut (same saturation/brightness as the app's
-     * own accent color, just rotated) so the shortcuts are distinguishable
-     * from one another at a glance, while still feeling on-brand rather than
-     * like random unrelated colors.
-     */
     private int getShortcutColor(int index) {
         int baseColor = ContextCompat.getColor(this, R.color.accent_color);
         float[] hsv = new float[3];
@@ -1876,13 +1485,6 @@ public class MainActivity extends AppCompatActivity {
         return IconCompat.createWithAdaptiveBitmap(bitmap);
     }
 
-    /**
-     * Optionally checks {yourdomain}/version.json for a newer build. Fully
-     * opt-in: if that file doesn't exist, this silently does nothing - there
-     * is no other backend requirement for the rest of the app to work.
-     * Publishing {"version_code": N, "apk_url": "..."} there is enough to
-     * turn it on for any given app.
-     */
     private void checkForAppUpdate() {
         long lastCheck = prefs.getLong("last_update_check", 0);
         if (System.currentTimeMillis() - lastCheck < UPDATE_CHECK_MIN_INTERVAL_MS) return;
@@ -1917,8 +1519,6 @@ public class MainActivity extends AppCompatActivity {
                     runOnUiThread(() -> showUpdateBanner(apkUrl));
                 }
             } catch (Exception ignored) {
-                // No version.json published, or unreachable - this feature is
-                // fully optional and should never interrupt normal use.
             }
         }).start();
     }
@@ -1928,37 +1528,18 @@ public class MainActivity extends AppCompatActivity {
         updateBanner.setOnClickListener(v -> openExternally(Uri.parse(apkUrl)));
     }
 
-    /**
-     * Shows a slim "No internet connection" strip whenever there's no active
-     * connection - separate from (and in addition to) the full-page offline
-     * cache, so there's always a clear, immediate signal even on pages that
-     * were never cached.
-     */
     private void setupConnectivityBanner() {
         ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         if (cm == null) return;
 
         isCurrentlyOnline = isOnline(cm);
         updateOfflineBanner(isCurrentlyOnline);
-        // If the app was closed while offline with items still queued, and
-        // is reopened when a connection already exists, there's no
-        // offline->online transition for onAvailable to react to - so try a
-        // flush right away instead of waiting for the network to flap.
         if (isCurrentlyOnline && getQueueSize() > 0) {
             flushOfflineQueue();
         } else if (getQueueSize() > 0) {
             OfflineQueueWorker.scheduleIfNeeded(getApplicationContext());
         }
 
-        // NET_CAPABILITY_VALIDATED (a real, confirmed-working internet check)
-        // sounds like the right thing to require, but in practice many real
-        // networks - school/campus WiFi with a slow or blocked validation
-        // endpoint, some captive portals, certain DNS setups - never end up
-        // marked "validated" even though the app's own server is perfectly
-        // reachable. Requiring it turned out to block syncing entirely on
-        // those networks. So: fire promptly on plain internet capability,
-        // and lean on the retry-with-backoff below (plus the onResume check
-        // above) to absorb the "fired a little too early" case instead.
         NetworkRequest request = new NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .build();
@@ -1999,28 +1580,12 @@ public class MainActivity extends AppCompatActivity {
         Network network = cm.getActiveNetwork();
         if (network == null) return false;
         NetworkCapabilities caps = cm.getNetworkCapabilities(network);
-        if (caps == null || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
-            return false;
-        }
-        // NET_CAPABILITY_INTERNET only means the network SHOULD provide
-        // internet based on its transport type - it stays true even when a
-        // carrier's walled-garden/captive-portal page (e.g. a "no data
-        // bundle" landing page) is intercepting every request instead of
-        // real internet actually being reachable. NET_CAPABILITY_VALIDATED
-        // is Android's own background check that a real connection to the
-        // internet succeeded, and correctly goes false in exactly that
-        // situation - without it, a phone with no data bundle looked
-        // "online" to the app, so saves silently vanished into the
-        // carrier's redirect instead of being queued, and the offline
-        // banner never appeared to explain why.
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+        return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
     }
 
     private void updateOfflineBanner(boolean online) {
         if (pendingBannerUpdate != null) bannerDebounceHandler.removeCallbacks(pendingBannerUpdate);
         pendingBannerUpdate = () -> offlineBanner.setVisibility(online ? View.GONE : View.VISIBLE);
-        // Going offline is shown right away (immediate feedback matters more);
-        // coming back online waits briefly in case it's just a flicker.
         bannerDebounceHandler.postDelayed(pendingBannerUpdate, online ? 600 : 0);
     }
 
@@ -2090,10 +1655,6 @@ public class MainActivity extends AppCompatActivity {
                 iconView.setLayoutParams(new LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
             } else {
-                // No icon was chosen for this tab - instead of a plain bullet
-                // dot, show the tab's first letter inside a small tinted
-                // circular badge, which reads as an intentional design rather
-                // than a missing icon.
                 String letter = label.isEmpty() ? "?" : label.substring(0, 1).toUpperCase();
                 iconView.setText(letter);
                 iconView.setTextSize(13);
@@ -2141,12 +1702,6 @@ public class MainActivity extends AppCompatActivity {
         moveIndicatorToActiveTab();
     }
 
-    /**
-     * Slides the thin accent-colored strip along the top of the bottom nav
-     * bar to sit under whichever tab is currently active, instead of just
-     * swapping icon/label colors with no motion. Also floats a soft circular
-     * highlight up behind the active tab's icon.
-     */
     private void moveIndicatorToActiveTab() {
         if (tabIndicator == null || tabUrls.isEmpty()) return;
         int activeIndex = tabUrls.indexOf(currentActiveUrl);
@@ -2222,4 +1777,4 @@ public class MainActivity extends AppCompatActivity {
         backPressedAt = System.currentTimeMillis();
         showSnackbar("Press back again to exit");
     }
-}
+            }
