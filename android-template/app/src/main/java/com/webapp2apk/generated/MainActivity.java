@@ -1999,7 +1999,21 @@ public class MainActivity extends AppCompatActivity {
         Network network = cm.getActiveNetwork();
         if (network == null) return false;
         NetworkCapabilities caps = cm.getNetworkCapabilities(network);
-        return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+        if (caps == null || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+            return false;
+        }
+        // NET_CAPABILITY_INTERNET only means the network SHOULD provide
+        // internet based on its transport type - it stays true even when a
+        // carrier's walled-garden/captive-portal page (e.g. a "no data
+        // bundle" landing page) is intercepting every request instead of
+        // real internet actually being reachable. NET_CAPABILITY_VALIDATED
+        // is Android's own background check that a real connection to the
+        // internet succeeded, and correctly goes false in exactly that
+        // situation - without it, a phone with no data bundle looked
+        // "online" to the app, so saves silently vanished into the
+        // carrier's redirect instead of being queued, and the offline
+        // banner never appeared to explain why.
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
     }
 
     private void updateOfflineBanner(boolean online) {
