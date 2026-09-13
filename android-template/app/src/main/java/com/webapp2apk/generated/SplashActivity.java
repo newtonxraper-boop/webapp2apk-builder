@@ -28,6 +28,8 @@ public class SplashActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_splash);
 
+        if (maybeShowPrivacyConsent()) return;
+
         ImageView icon = findViewById(R.id.splashIcon);
         TextView text = findViewById(R.id.splashText);
         icon.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(400).setStartDelay(80).start();
@@ -61,6 +63,48 @@ public class SplashActivity extends AppCompatActivity {
             long remaining = Math.max(0, MIN_SPLASH_DELAY_MS - elapsed);
             mainHandler.postDelayed(this::navigateToMain, remaining);
         });
+    }
+
+    /**
+     * Shows a one-time, blocking consent dialog before anything else if
+     * this build has a privacy_policy_url configured and the person hasn't
+     * accepted it yet. Returns true if it's showing (caller should stop its
+     * own onCreate right there) - most builds won't have a policy URL set,
+     * so this is a no-op false for them.
+     */
+    private boolean maybeShowPrivacyConsent() {
+        String policyUrl = App.appConfig.optString("privacy_policy_url", "");
+        if (policyUrl.isEmpty()) return false;
+
+        android.content.SharedPreferences prefs =
+                getSharedPreferences("webapp2apk_prefs", MODE_PRIVATE);
+        if (prefs.getBoolean("privacy_consent_accepted", false)) return false;
+
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("Before you continue")
+                .setMessage("This app may collect and use information you enter "
+                        + "(such as names, phone numbers, or photos) to provide its "
+                        + "features. Tap \"View policy\" for full details.")
+                .setCancelable(false)
+                .setPositiveButton("I Agree", (dialog, which) -> {
+                    prefs.edit().putBoolean("privacy_consent_accepted", true).apply();
+                    recreate();
+                })
+                .setNeutralButton("View policy", (dialog, which) -> {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(policyUrl)));
+                    } catch (Exception ignored) {
+                    }
+                })
+                .setNegativeButton("Decline", (dialog, which) -> {
+                    // Declining a required consent means the app genuinely
+                    // can't be used, not just this screen - close it outright
+                    // rather than leaving a half-started app behind.
+                    finishAffinity();
+                })
+                .show();
+
+        return true;
     }
 
     private void navigateToMain() {

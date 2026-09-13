@@ -127,7 +127,8 @@
             android:gravity="center"
             android:elevation="10dp"
             android:clickable="true"
-            android:focusable="true" />
+            android:focusable="true"
+            android:contentDescription="Share this page" />
 
         <TextView
             android:id="@+id/refreshButton"
@@ -142,7 +143,8 @@
             android:gravity="center"
             android:elevation="10dp"
             android:clickable="true"
-            android:focusable="true" />
+            android:focusable="true"
+            android:contentDescription="Reload page" />
 
         <TextView
             android:id="@+id/settingsButton"
@@ -157,7 +159,8 @@
             android:gravity="center"
             android:elevation="10dp"
             android:clickable="true"
-            android:focusable="true" />
+            android:focusable="true"
+            android:contentDescription="Settings" />
 
     </FrameLayout>
 
@@ -174,14 +177,16 @@
             android:layout_width="match_parent"
             android:layout_height="1dp"
             android:layout_gravity="top"
-            android:background="#33FFFFFF" />
+            android:background="#33FFFFFF"
+            android:importantForAccessibility="no" />
 
         <View
             android:id="@+id/tabIndicator"
             android:layout_width="0dp"
             android:layout_height="3dp"
             android:layout_gravity="top|start"
-            android:background="@color/accent_color" />
+            android:background="@color/accent_color"
+            android:importantForAccessibility="no" />
 
         <View
             android:id="@+id/tabNotch"
@@ -190,7 +195,8 @@
             android:layout_gravity="top|start"
             android:background="@drawable/tab_notch_bg"
             android:alpha="0"
-            android:translationY="4dp" />
+            android:translationY="4dp"
+            android:importantForAccessibility="no" />
 
         <LinearLayout
             android:id="@+id/bottomTabBar"

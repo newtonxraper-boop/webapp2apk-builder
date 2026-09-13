@@ -47,6 +47,14 @@ on:
         description: 'Base64-encoded JSON array of bottom nav tabs'
         required: false
         default: ''
+      crash_report_url:
+        description: 'Optional URL to POST crash reports to (leave blank to disable)'
+        required: false
+        default: ''
+      privacy_policy_url:
+        description: 'Optional URL to a privacy policy, shown once on first launch (leave blank to disable)'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -77,6 +85,8 @@ jobs:
           PUSH_ENABLED: ${{ inputs.push_enabled }}
           FILECAMERA_ENABLED: ${{ inputs.filecamera_enabled }}
           NAV_ITEMS_B64: ${{ inputs.nav_items_b64 }}
+          CRASH_REPORT_URL: ${{ inputs.crash_report_url }}
+          PRIVACY_POLICY_URL: ${{ inputs.privacy_policy_url }}
         run: python3 scripts/generate_resources.py
 
       - name: Show generated config files (debug)
@@ -94,9 +104,26 @@ jobs:
           echo "----- nav_items.json -----"
           cat android-template/app/src/main/assets/nav_items.json
 
-      - name: Generate debug keystore if missing
+      - name: Use release keystore from repository secrets (if configured)
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
         run: |
-          if [ ! -f android-template/app/debug.keystore ]; then
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > android-template/app/release.keystore
+            echo "KEYSTORE_PATH=release.keystore" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=${{ secrets.RELEASE_KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=${{ secrets.RELEASE_KEY_ALIAS }}" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=${{ secrets.RELEASE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+            echo "Using the real release keystore from repository secrets."
+          else
+            echo "No RELEASE_KEYSTORE_BASE64 secret configured yet."
+            echo "Run the 'Generate Release Keystore (one-time setup)' workflow, then add the four secrets it prints - see its job summary for exact steps."
+            echo "Falling back to a debug keystore for now (NOT suitable for real distribution - anyone can re-sign updates to this app)."
+          fi
+
+      - name: Generate debug keystore if missing (fallback only)
+        run: |
+          if [ -z "$KEYSTORE_PATH" ] && [ ! -f android-template/app/debug.keystore ]; then
             keytool -genkeypair -v \
               -keystore android-template/app/debug.keystore \
               -storepass android -keypass android \

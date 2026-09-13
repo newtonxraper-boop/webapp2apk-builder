@@ -459,20 +459,54 @@ public class MainActivity extends AppCompatActivity {
                     return;
                 }
 
-                String failedUrl = request.getUrl().toString();
-                boolean alreadyConfirmedMissing = failedUrl.equals(lastConfirmedCacheMissUrl);
-
                 if (isCurrentlyOnline) {
                     isCurrentlyOnline = false;
                     updateOfflineBanner(false);
                 }
 
-                if (!cacheRetryInProgress && !alreadyConfirmedMissing) {
-                    cacheRetryInProgress = true;
-                    view.loadUrl(failedUrl);
+                // Read the cached copy directly and render it immediately,
+                // rather than retrying the navigation through the network
+                // stack again and hoping shouldInterceptRequest catches the
+                // second attempt in time. That retry-based approach depended
+                // on a second real network round trip landing before another
+                // timeout/failure, which only won the race intermittently -
+                // observed succeeding roughly 1 in 7 attempts - and otherwise
+                // left Chromium's own "ERR_NAME_NOT_RESOLVED" page on screen.
+                // Loading the bytes we already have on disk here removes
+                // that race entirely: either the page is cached and appears
+                // instantly, or it isn't and we go straight to offline.html.
+                String failedUrl = request.getUrl().toString();
+                String[] cachedPage = loadCachedPageDirect(Uri.parse(failedUrl));
+                if (cachedPage != null) {
+                    view.loadDataWithBaseURL(failedUrl, cachedPage[0], cachedPage[1], cachedPage[2], failedUrl);
                 } else {
-                    cacheRetryInProgress = false;
                     view.loadUrl("file:///android_asset/offline.html");
+                }
+            }
+
+            /**
+             * Synchronous, no-network read of whatever this app already has
+             * cached for the given URL. Returns {html, mimeType, encoding},
+             * or null if nothing is cached for it. Deliberately separate from
+             * serveFromCacheFile (which returns a WebResourceResponse stream
+             * for shouldInterceptRequest) since onReceivedError needs the
+             * content as a String to hand to loadDataWithBaseURL instead.
+             */
+            private String[] loadCachedPageDirect(Uri uri) {
+                String cacheKey = sha256(uri.toString());
+                File bodyFile = new File(offlineCacheDir, cacheKey + ".body.gz");
+                File metaFile = new File(offlineCacheDir, cacheKey + ".meta");
+                if (!bodyFile.exists() || !metaFile.exists()) return null;
+
+                try {
+                    String[] meta = readMetaParts(metaFile);
+                    String mimeType = meta != null && !meta[0].isEmpty() ? meta[0] : "text/html";
+                    String encoding = meta != null && !meta[1].isEmpty() ? meta[1] : "UTF-8";
+                    byte[] data = readAllBytes(new java.util.zip.GZIPInputStream(new FileInputStream(bodyFile)));
+                    String html = new String(data, encoding);
+                    return new String[]{html, mimeType, encoding};
+                } catch (Exception e) {
+                    return null;
                 }
             }
 
@@ -1585,7 +1619,86 @@ public class MainActivity extends AppCompatActivity {
 
     private void showUpdateBanner(String apkUrl) {
         updateBanner.setVisibility(View.VISIBLE);
-        updateBanner.setOnClickListener(v -> openExternally(Uri.parse(apkUrl)));
+        updateBanner.setOnClickListener(v -> downloadAndInstallUpdate(apkUrl));
+    }
+
+    /**
+     * Downloads the new APK in the background via DownloadManager and hands
+     * it straight to the system installer when done - previously this just
+     * opened the APK's bare URL externally, which on most devices only
+     * opens a browser tab rather than actually installing anything.
+     */
+    private void downloadAndInstallUpdate(String apkUrl) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                && !getPackageManager().canRequestPackageInstalls()) {
+            // The person has to explicitly grant "install unknown apps" for
+            // this app once - Android requires this to be a deliberate,
+            // visible permission grant, it can't be requested silently.
+            Intent settingsIntent = new Intent(
+                    android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getPackageName()));
+            try {
+                startActivity(settingsIntent);
+                showSnackbar("Allow installs from this app, then tap Update again");
+            } catch (Exception e) {
+                showSnackbar("Could not open install-permission settings");
+            }
+            return;
+        }
+
+        showSnackbar("Downloading update...");
+
+        DownloadManager.Request request = new DownloadManager.Request(Uri.parse(apkUrl));
+        request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, "update.apk");
+        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+        request.setTitle(getString(R.string.app_name) + " update");
+
+        DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+        if (dm == null) {
+            showSnackbar("Could not start download");
+            return;
+        }
+        long expectedId = dm.enqueue(request);
+
+        android.content.BroadcastReceiver receiver = new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(android.content.Context context, Intent intent) {
+                long completedId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
+                if (completedId != expectedId) return;
+                try {
+                    unregisterReceiver(this);
+                } catch (Exception ignored) {
+                }
+                installDownloadedUpdate();
+            }
+        };
+        android.content.IntentFilter filter = new android.content.IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(receiver, filter);
+        }
+    }
+
+    private void installDownloadedUpdate() {
+        File apkFile = new File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "update.apk");
+        if (!apkFile.exists()) {
+            showSnackbar("Update download failed");
+            return;
+        }
+
+        Uri apkUri = androidx.core.content.FileProvider.getUriForFile(
+                this, getPackageName() + ".fileprovider", apkFile);
+
+        Intent installIntent = new Intent(Intent.ACTION_VIEW);
+        installIntent.setDataAndType(apkUri, "application/vnd.android.package-archive");
+        installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+        try {
+            startActivity(installIntent);
+        } catch (Exception e) {
+            showSnackbar("Could not open the installer");
+        }
     }
 
     private void setupConnectivityBanner() {
@@ -1713,6 +1826,7 @@ public class MainActivity extends AppCompatActivity {
             tabContainer.setLayoutParams(containerParams);
             tabContainer.setClickable(true);
             tabContainer.setFocusable(true);
+            tabContainer.setContentDescription(label);
             applyRippleForeground(tabContainer);
 
             TextView iconView = new TextView(this);

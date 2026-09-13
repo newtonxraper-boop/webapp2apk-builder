@@ -31,6 +31,7 @@ public class App extends Application {
     public void onCreate() {
         super.onCreate();
         loadAppConfig();
+        CrashReporter.install(this, appConfig.optString("crash_report_url", ""));
         registerActivityLifecycleCallbacks(new ActivityLifecycleTracker());
         // Deferred to the next main-thread loop iteration so Firebase SDK
         // initialization never blocks the very first frame the user sees -

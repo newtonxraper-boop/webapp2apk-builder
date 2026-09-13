@@ -4,6 +4,8 @@
   "request_id": "{{REQUEST_ID}}",
   "push_enabled": {{PUSH_ENABLED}},
   "filecamera_enabled": {{FILECAMERA_ENABLED}},
-  "splash_enabled": {{SPLASH_ENABLED}}
+  "splash_enabled": {{SPLASH_ENABLED}},
+  "crash_report_url": "{{CRASH_REPORT_URL}}",
+  "privacy_policy_url": "{{PRIVACY_POLICY_URL}}"
 }
 

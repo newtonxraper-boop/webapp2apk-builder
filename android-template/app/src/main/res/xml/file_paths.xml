@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Matches getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), which
+         is where downloadAndInstallUpdate() in MainActivity saves the
+         downloaded update APK before handing it to the system installer. -->
+    <external-files-path name="downloads" path="Download/" />
+</paths>

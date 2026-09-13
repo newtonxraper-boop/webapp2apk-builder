@@ -249,6 +249,12 @@ def main():
         "{{PUSH_ENABLED}}": push_enabled,
         "{{FILECAMERA_ENABLED}}": filecamera_enabled,
         "{{VERSION_CODE}}": version_code,
+        # Both optional and empty by default - most target web apps won't
+        # have a crash_report.php endpoint or a dedicated privacy policy
+        # page, so leaving these blank must be a safe, silent no-op on the
+        # app side rather than something that needs explicit disabling.
+        "{{CRASH_REPORT_URL}}": os.environ.get("CRASH_REPORT_URL", "").strip().replace('"', ""),
+        "{{PRIVACY_POLICY_URL}}": os.environ.get("PRIVACY_POLICY_URL", "").strip().replace('"', ""),
     }
     for placeholder, value in firebase_env.items():
         if value:
