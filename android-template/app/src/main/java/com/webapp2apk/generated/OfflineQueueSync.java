@@ -139,12 +139,10 @@ final class OfflineQueueSync {
     static final class FlushResult {
         final int succeeded;
         final int remaining;
-        final String lastErrorMessage;
 
-        FlushResult(int succeeded, int remaining, String lastErrorMessage) {
+        FlushResult(int succeeded, int remaining) {
             this.succeeded = succeeded;
             this.remaining = remaining;
-            this.lastErrorMessage = lastErrorMessage;
         }
     }
 
@@ -162,21 +160,18 @@ final class OfflineQueueSync {
             try {
                 lines = readQueueLines(context);
             } catch (Exception e) {
-                return new FlushResult(0, 0, null);
+                return new FlushResult(0, 0);
             }
         }
-        if (lines.isEmpty()) return new FlushResult(0, 0, null);
+        if (lines.isEmpty()) return new FlushResult(0, 0);
 
         List<String> remaining = new ArrayList<>();
         int succeeded = 0;
-        String lastError = null;
         for (String line : lines) {
-            SubmitResult result = trySubmitQueuedItem(line);
-            if (result.success) {
+            if (trySubmitQueuedItem(line)) {
                 succeeded++;
             } else {
                 remaining.add(line);
-                lastError = result.errorMessage;
             }
         }
 
@@ -184,20 +179,10 @@ final class OfflineQueueSync {
             writeQueueLines(context, remaining);
         }
 
-        return new FlushResult(succeeded, remaining.size(), lastError);
+        return new FlushResult(succeeded, remaining.size());
     }
 
-    private static final class SubmitResult {
-        final boolean success;
-        final String errorMessage;
-
-        SubmitResult(boolean success, String errorMessage) {
-            this.success = success;
-            this.errorMessage = errorMessage;
-        }
-    }
-
-    private static SubmitResult trySubmitQueuedItem(String jsonLine) {
+    private static boolean trySubmitQueuedItem(String jsonLine) {
         try {
             JSONObject obj = new JSONObject(jsonLine);
             String urlStr = obj.getString("url");
@@ -233,14 +218,9 @@ final class OfflineQueueSync {
 
             int status = conn.getResponseCode();
             conn.disconnect();
-            if (status >= 200 && status < 400) {
-                return new SubmitResult(true, null);
-            }
-            return new SubmitResult(false, "HTTP " + status + " from server for " + urlStr);
+            return status >= 200 && status < 400;
         } catch (Exception e) {
-            String msg = e.getClass().getSimpleName();
-            if (e.getMessage() != null) msg += ": " + e.getMessage();
-            return new SubmitResult(false, msg);
+            return false;
         }
     }
 
