@@ -1231,10 +1231,18 @@ public class MainActivity extends AppCompatActivity {
             OfflineQueueSync.FlushResult result = OfflineQueueSync.flush(this);
             final int finalSucceeded = result.succeeded;
             final int finalRemaining = result.remaining;
+            final String lastError = result.lastErrorMessage;
             runOnUiThread(() -> {
                 updateSyncBanner(finalRemaining);
                 if (finalSucceeded > 0) {
                     showSnackbar(finalSucceeded == 1 ? "1 saved item sent" : finalSucceeded + " saved items sent");
+                } else if (finalRemaining > 0 && lastError != null) {
+                    // Previously silent on failure - now shows exactly why so
+                    // it doesn't look like nothing happened when it actually
+                    // tried and failed (e.g. expired session, wrong URL,
+                    // server error).
+                    showSnackbar("Send failed: " + lastError);
+                    android.util.Log.w("OfflineQueue", "Flush failed: " + lastError);
                 }
                 if (finalRemaining > 0) {
                     OfflineQueueWorker.scheduleIfNeeded(getApplicationContext());
