@@ -111,6 +111,11 @@ public class MainActivity extends AppCompatActivity {
 
     private String lastConfirmedCacheMissUrl;
 
+    private final android.os.Handler watchdogHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private Runnable watchdogTick;
+    private int watchdogMissedBeats = 0;
+    private long watchdogSnackbarShownAt = 0;
+
     private final List<LinearLayout> tabContainers = new ArrayList<>();
     private final List<String> tabUrls = new ArrayList<>();
     private final List<GradientDrawable> tabBadgeGlow = new ArrayList<>();
@@ -169,6 +174,10 @@ public class MainActivity extends AppCompatActivity {
         tabIndicator = findViewById(R.id.tabIndicator);
         tabNotch = findViewById(R.id.tabNotch);
         offlineBanner = findViewById(R.id.offlineBanner);
+        offlineBanner.setOnClickListener(v -> {
+            v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+            attemptRealRefresh();
+        });
         updateBanner = findViewById(R.id.updateBanner);
         shareButton = findViewById(R.id.shareButton);
         refreshButton = findViewById(R.id.refreshButton);
@@ -188,7 +197,13 @@ public class MainActivity extends AppCompatActivity {
         filecameraEnabled = config.optBoolean("filecamera_enabled", true);
 
         String shortcutUrl = getIntent() != null ? getIntent().getStringExtra("shortcut_url") : null;
-        String startUrl = (shortcutUrl != null && !shortcutUrl.isEmpty()) ? shortcutUrl : homeUrl;
+        String deepLinkUrl = resolveDeepLinkUrl(getIntent());
+        String startUrl = homeUrl;
+        if (deepLinkUrl != null) {
+            startUrl = deepLinkUrl;
+        } else if (shortcutUrl != null && !shortcutUrl.isEmpty()) {
+            startUrl = shortcutUrl;
+        }
         currentActiveUrl = startUrl;
 
         offlineCacheDir = new File(getFilesDir(), "webcache");
@@ -208,8 +223,43 @@ public class MainActivity extends AppCompatActivity {
         setupBottomTabs();
         checkForAppUpdate();
         maybeShowLockScreen();
+        PeriodicRefreshWorker.scheduleIfNeeded(getApplicationContext());
 
         webView.loadUrl(startUrl);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        String deepLinkUrl = resolveDeepLinkUrl(intent);
+        if (deepLinkUrl != null && webView != null) {
+            currentActiveUrl = deepLinkUrl;
+            webView.loadUrl(deepLinkUrl);
+        }
+    }
+
+    /**
+     * A VIEW Intent whose data Uri's host matches the web app's own domain
+     * (see the AndroidManifest App Links intent-filter) is a deep link -
+     * someone tapped a link to this app's site from outside the app
+     * (WhatsApp, SMS, a search result) and Android routed it straight here
+     * instead of a browser. Anything else (a plain launcher tap, the
+     * dynamic-shortcut extra, a notification tap) has no data Uri and
+     * this simply returns null so the normal home/shortcut URL logic
+     * applies unchanged.
+     */
+    private String resolveDeepLinkUrl(Intent intent) {
+        if (intent == null || intent.getData() == null) return null;
+        Uri data = intent.getData();
+        try {
+            Uri homeUri = Uri.parse(homeUrl);
+            if (homeUri.getHost() != null && homeUri.getHost().equalsIgnoreCase(data.getHost())) {
+                return data.toString();
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 
     @Override
@@ -219,6 +269,7 @@ public class MainActivity extends AppCompatActivity {
         webView.pauseTimers();
         CookieManager.getInstance().flush();
         OfflineQueueWorker.scheduleIfNeeded(getApplicationContext());
+        stopWebViewWatchdog();
     }
 
     @Override
@@ -227,6 +278,8 @@ public class MainActivity extends AppCompatActivity {
         maybeShowLockScreen();
         webView.onResume();
         webView.resumeTimers();
+        watchdogMissedBeats = 0;
+        startWebViewWatchdog();
         if (prefs != null) prefs.edit().putInt("unread_notification_count", 0).apply();
         ConnectivityManager resumeCm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         if (resumeCm != null) {
@@ -244,6 +297,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        stopWebViewWatchdog();
         cancelQueueRetry();
         if (networkCallback != null && connectivityCallbackRegistered) {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
@@ -391,6 +445,12 @@ public class MainActivity extends AppCompatActivity {
         webView.addJavascriptInterface(new OfflineQueueBridge(), "AndroidOfflineQueue");
         webView.addJavascriptInterface(new RetryBridge(), "AndroidRetry");
         webView.addJavascriptInterface(new CredentialBridge(), "AndroidCredentials");
+        // Lets the web app itself trigger Android's native share sheet with
+        // real content (an invoice line, a receipt PDF) - not just the
+        // "share this page's URL" the floating share button already does.
+        // Call from the page as: AndroidShare.shareText("...") or
+        // AndroidShare.shareFileBase64(base64Data, "receipt.pdf", "application/pdf").
+        webView.addJavascriptInterface(new ShareBridge(this), "AndroidShare");
 
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
@@ -876,7 +936,23 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setupSwipeRefresh() {
-        swipeRefresh.setEnabled(false);
+        // Previously disabled outright - a bare webView.reload() on pull
+        // would have silently done nothing useful while offline (it would
+        // just re-show the same cached/offline page with no feedback).
+        // Routing it through attemptRealRefresh() gives pull-to-refresh the
+        // same "recheck connectivity, retry the real URL if we were on the
+        // offline placeholder, flush the queue if we're back online" logic
+        // the existing refresh button and JS retry bridge already use.
+        swipeRefresh.setEnabled(true);
+        swipeRefresh.setOnRefreshListener(() -> {
+            swipeRefresh.setRefreshing(true);
+            attemptRealRefresh();
+            // onPageFinished() already calls swipeRefresh.setRefreshing(false)
+            // once the reload actually completes; this is just a safety net
+            // in case the page was already fully loaded (WebView won't fire
+            // onPageFinished again for an identical reload in every case).
+            swipeRefresh.postDelayed(() -> swipeRefresh.setRefreshing(false), 3000);
+        });
     }
 
     private static final long MAX_QUEUEABLE_FILE_BYTES = 4L * 1024 * 1024;
@@ -1549,6 +1625,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private boolean openExternally(Uri uri) {
+        String scheme = uri.getScheme();
+        boolean isWebScheme = "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
+        // Non-http(s) links (tel:, mailto:, intent:, upi:, whatsapp:// deep
+        // links, mobile money app schemes, etc.) have to go through a plain
+        // Intent - a Custom Tab can only ever open a web URL.
+        if (isWebScheme && CustomTabsHelper.open(this, uri, CustomTabsHelper.resolveToolbarColor(this))) {
+            return true;
+        }
         try {
             startActivity(new Intent(Intent.ACTION_VIEW, uri));
             return true;
@@ -1766,8 +1850,20 @@ public class MainActivity extends AppCompatActivity {
                 .build();
 
         networkCallback = new ConnectivityManager.NetworkCallback() {
+            private boolean isActiveNetwork(Network network) {
+                Network active = cm.getActiveNetwork();
+                return active != null && active.equals(network);
+            }
+
             @Override
             public void onAvailable(Network network) {
+                // Only trust this if it's actually the network the device
+                // is using right now - a phone can have a second network
+                // (e.g. a weak/idle Wi-Fi alongside cellular) whose events
+                // have nothing to do with what's actually being used, and
+                // reacting to those was flipping the banner backwards.
+                if (!isActiveNetwork(network)) return;
+
                 // Don't just assume "available" means truly online - a
                 // network can appear (radio connected) before Android has
                 // finished validating it actually reaches the internet.
@@ -1783,6 +1879,10 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
+                // Same reasoning as onAvailable: ignore capability changes
+                // on any network other than the one actually in use.
+                if (!isActiveNetwork(network)) return;
+
                 // The radio connection can stay up the entire time while
                 // NET_CAPABILITY_VALIDATED silently flips - e.g. a data
                 // bundle running out mid-session, or a carrier walled
@@ -1810,6 +1910,11 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onLosing(Network network, int maxMsToLive) {
+                // Same reasoning: a secondary network fading out shouldn't
+                // flip the banner if the device's actual default network is
+                // fine.
+                if (!isActiveNetwork(network)) return;
+
                 // Android's own early warning that this network is about to
                 // go away, fired before the actual disconnect - switch to
                 // offline mode proactively instead of waiting for onLost.
@@ -1862,6 +1967,117 @@ public class MainActivity extends AppCompatActivity {
         if (pendingBannerUpdate != null) bannerDebounceHandler.removeCallbacks(pendingBannerUpdate);
         pendingBannerUpdate = () -> offlineBanner.setVisibility(online ? View.GONE : View.VISIBLE);
         bannerDebounceHandler.postDelayed(pendingBannerUpdate, online ? 600 : 0);
+
+        // Keep the widget's status line in sync with whatever the in-app
+        // banner is showing, without the widget needing the app process
+        // alive to know this.
+        WebAppWidgetProvider.setLastOnline(getApplicationContext(), online);
+
+        if (!online) {
+            scheduleReachabilityRecheck();
+        }
+    }
+
+    private volatile boolean reachabilityProbeInFlight = false;
+
+    /**
+     * NET_CAPABILITY_VALIDATED (isOnline()'s primary signal) is right the
+     * overwhelming majority of the time, but two real gaps are worth
+     * covering rather than just trusting it blindly: some OEM network
+     * stacks are slow to flip VALIDATED right after a network change, and a
+     * carrier walled-garden/expired-data-bundle page can occasionally still
+     * leave VALIDATED true briefly (or leave it false longer than the radio
+     * is actually usable). A few seconds after the banner goes to
+     * "offline", this fires one real HTTP probe against the app's own
+     * domain - the only actual ground truth for "will this app work right
+     * now" - and if it succeeds where the OS signal said it wouldn't, it
+     * corrects the banner and flushes the queue immediately instead of
+     * waiting for the next network callback (which, in a walled-garden
+     * case, might never come, since the radio never actually changes
+     * state).
+     */
+    private void scheduleReachabilityRecheck() {
+        if (reachabilityProbeInFlight) return;
+        reachabilityProbeInFlight = true;
+        bannerDebounceHandler.postDelayed(() -> {
+            new Thread(() -> {
+                boolean reachable = NetworkReachability.probe(getApplicationContext());
+                reachabilityProbeInFlight = false;
+                if (!reachable || isCurrentlyOnline) return;
+                runOnUiThread(() -> {
+                    boolean wasOffline = !isCurrentlyOnline;
+                    isCurrentlyOnline = true;
+                    updateOfflineBanner(true);
+                    if (wasOffline) showSnackbar("Back online");
+                    flushOfflineQueue();
+                });
+            }).start();
+        }, 3000);
+    }
+
+    private static final long WATCHDOG_INTERVAL_MS = 12_000;
+    private static final long WATCHDOG_ANSWER_TIMEOUT_MS = 7_000;
+    private static final int WATCHDOG_MISSED_BEATS_BEFORE_WARNING = 2;
+    private static final long WATCHDOG_SNACKBAR_COOLDOWN_MS = 60_000;
+
+    /**
+     * A hung WebView renderer (a runaway page script, a rare WebView-process
+     * hiccup that doesn't always surface as onRenderProcessGone on every
+     * Android version) otherwise just looks like a frozen white/blank
+     * screen with no feedback and no way out except force-closing the whole
+     * app. Every WATCHDOG_INTERVAL_MS this asks the page a trivial question
+     * (its own title) - a healthy renderer answers within milliseconds. If
+     * two heartbeats in a row never get an answer within the timeout, the
+     * renderer is genuinely stuck, not just doing something slow once, and
+     * a "Reload" Snackbar gives the person a way out that doesn't require
+     * killing the app.
+     */
+    private void startWebViewWatchdog() {
+        watchdogTick = () -> {
+            if (webView == null) return;
+            final boolean[] answered = {false};
+            try {
+                webView.evaluateJavascript("document.title||''", value -> answered[0] = true);
+            } catch (Exception e) {
+                answered[0] = true; // evaluateJavascript itself failing isn't a hang.
+            }
+            watchdogHandler.postDelayed(() -> {
+                if (answered[0]) {
+                    watchdogMissedBeats = 0;
+                } else {
+                    watchdogMissedBeats++;
+                    if (watchdogMissedBeats >= WATCHDOG_MISSED_BEATS_BEFORE_WARNING) {
+                        maybeShowHungPageWarning();
+                    }
+                }
+                watchdogHandler.postDelayed(watchdogTick, WATCHDOG_INTERVAL_MS);
+            }, WATCHDOG_ANSWER_TIMEOUT_MS);
+        };
+        watchdogHandler.postDelayed(watchdogTick, WATCHDOG_INTERVAL_MS);
+    }
+
+    private void stopWebViewWatchdog() {
+        if (watchdogTick != null) {
+            watchdogHandler.removeCallbacks(watchdogTick);
+        }
+    }
+
+    private void maybeShowHungPageWarning() {
+        long now = System.currentTimeMillis();
+        if (now - watchdogSnackbarShownAt < WATCHDOG_SNACKBAR_COOLDOWN_MS) return;
+        watchdogSnackbarShownAt = now;
+        watchdogMissedBeats = 0;
+
+        View root = findViewById(android.R.id.content);
+        Snackbar snackbar = Snackbar.make(root, "This page isn't responding", Snackbar.LENGTH_INDEFINITE);
+        snackbar.setBackgroundTint(ContextCompat.getColor(this, R.color.primary_dark_color));
+        snackbar.setTextColor(ContextCompat.getColor(this, android.R.color.white));
+        snackbar.setAction("Reload", v -> {
+            v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+            attemptRealRefresh();
+        });
+        snackbar.setActionTextColor(ContextCompat.getColor(this, R.color.accent_color));
+        snackbar.show();
     }
 
     private void showSnackbar(String message) {

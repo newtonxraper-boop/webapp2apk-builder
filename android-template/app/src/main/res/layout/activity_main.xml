@@ -10,13 +10,15 @@
         android:layout_height="wrap_content"
         android:layout_margin="8dp"
         android:background="@drawable/banner_bg_offline"
-        android:text="No internet connection"
+        android:text="No internet connection \u00b7 tap to retry"
         android:textColor="#FFFFFF"
         android:textSize="12sp"
         android:gravity="center"
         android:padding="10dp"
         android:elevation="4dp"
         android:alpha="0.95"
+        android:clickable="true"
+        android:focusable="true"
         android:visibility="gone" />
 
     <TextView

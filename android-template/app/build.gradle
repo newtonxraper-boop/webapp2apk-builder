@@ -81,6 +81,10 @@ dependencies {
     // App Lock screen: fingerprint / face unlock, with the device PIN,
     // pattern, or password as the automatic fallback.
     implementation 'androidx.biometric:biometric:1.1.0'
+    // Custom Tabs: off-domain links open in a themed in-app browser sheet
+    // (back gesture returns straight to the app) instead of switching to a
+    // separate browser app.
+    implementation 'androidx.browser:browser:1.8.0'
 }
 
 configurations.all {

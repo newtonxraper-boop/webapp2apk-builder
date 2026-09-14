@@ -4,4 +4,9 @@
          is where downloadAndInstallUpdate() in MainActivity saves the
          downloaded update APK before handing it to the system installer. -->
     <external-files-path name="downloads" path="Download/" />
+    <!-- Matches getCacheDir()/shared/, where ShareBridge writes a file
+         handed to it from JS (as base64) before passing it to the system
+         share sheet - cache-path rather than files-path since these are
+         disposable, re-creatable on every share call. -->
+    <cache-path name="shared" path="shared/" />
 </paths>

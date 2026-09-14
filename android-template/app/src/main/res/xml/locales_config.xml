@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Declares which languages this app can be switched into independently of
+    the phone's system language. On Android 13+ this alone makes a native
+    "App language" entry appear under system Settings > Apps > (this app).
+    On older versions SettingsActivity's own language row calls
+    AppCompatDelegate.setApplicationLocales(...) directly, which reads this
+    same list via AppCompatDelegate's LocaleManagerCompat.
+
+    Add/remove <locale> entries here to match the languages the target web
+    app actually supports - each one must have a matching values-<code>/
+    strings.xml if any app-native strings (Settings screen labels, banners)
+    should also be translated, otherwise it only affects which locale gets
+    passed to the web app in the "Accept-Language" sense of things.
+    en / sw / fr / lg are included as a starting point for an East-Africa
+    facing app; trim or extend per project.
+-->
+<locale-config xmlns:android="http://schemas.android.com/apk/res/android">
+    <locale android:name="en" />
+    <locale android:name="sw" />
+    <locale android:name="fr" />
+    <locale android:name="lg" />
+</locale-config>

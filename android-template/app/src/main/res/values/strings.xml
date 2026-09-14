@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">{{APP_NAME}}</string>
     <string name="app_url">{{APP_URL}}</string>
+    <string name="app_host" translatable="false">{{APP_HOST}}</string>
 
     <!-- Firebase config for shared multi-app messaging project -->
     <string name="firebase_api_key" translatable="false">{{FIREBASE_API_KEY}}</string>

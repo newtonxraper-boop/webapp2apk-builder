@@ -2,6 +2,7 @@ package com.webapp2apk.generated;
 
 import android.app.Application;
 import android.os.Bundle;
+import com.google.android.material.color.DynamicColors;
 import com.google.firebase.FirebaseApp;
 import com.google.firebase.FirebaseOptions;
 import com.google.firebase.messaging.FirebaseMessaging;
@@ -33,6 +34,14 @@ public class App extends Application {
         loadAppConfig();
         CrashReporter.install(this, appConfig.optString("crash_report_url", ""));
         registerActivityLifecycleCallbacks(new ActivityLifecycleTracker());
+        // On Android 12+ (Material You devices) this tints each activity's
+        // Material components - buttons, the settings screen's toolbar,
+        // switches - with colors extracted from the user's own wallpaper,
+        // on top of the app's own primary/accent branding underneath. It's
+        // a genuine no-op everywhere else (older Android, or a device whose
+        // OEM skin doesn't expose dynamic colors), so it's always safe to
+        // register unconditionally rather than gating it on a build flag.
+        DynamicColors.applyToActivitiesIfAvailable(this);
         // Deferred to the next main-thread loop iteration so Firebase SDK
         // initialization never blocks the very first frame the user sees -
         // appConfig itself is still loaded synchronously above since

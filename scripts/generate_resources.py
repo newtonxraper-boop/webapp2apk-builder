@@ -17,6 +17,7 @@ import os
 import re
 import time
 import urllib.request
+from urllib.parse import urlparse
 
 TEMPLATE_ROOT = "android-template"
 
@@ -214,6 +215,14 @@ def main():
     raw_package = os.environ.get("PACKAGE_NAME", "").strip()
     package_name = validate_package_name(raw_package) if raw_package else derive_package_name(app_name)
 
+    # Deep links (App Links / Custom Tabs origin matching) need a bare host,
+    # not the full URL - manifest <data android:host="..."> can't take a
+    # scheme or path. Falls back to "example.com" so a malformed APP_URL
+    # never breaks the manifest merge; that placeholder host just never
+    # matches anything real, so deep linking silently does nothing instead
+    # of failing the build.
+    app_host = urlparse(app_url).hostname or "example.com"
+
     primary_color = sanitize_hex_color(os.environ.get("PRIMARY_COLOR", ""), default="#3DDC84")
     accent_color = sanitize_hex_color(os.environ.get("ACCENT_COLOR", ""), default="#3DDC84")
     primary_dark_color = darken_hex_color(primary_color)
@@ -240,6 +249,7 @@ def main():
     replacements = {
         "{{APP_NAME}}": app_name,
         "{{APP_URL}}": app_url,
+        "{{APP_HOST}}": app_host,
         "{{PACKAGE_NAME}}": package_name,
         "{{REQUEST_ID}}": request_id,
         "{{PRIMARY_COLOR}}": primary_color,

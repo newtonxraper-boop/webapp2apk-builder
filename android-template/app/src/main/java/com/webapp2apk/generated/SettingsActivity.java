@@ -3,12 +3,16 @@ package com.webapp2apk.generated;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.os.Bundle;
+import android.view.View;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.appcompat.app.AppCompatDelegate;
 import androidx.appcompat.widget.Toolbar;
 import androidx.core.content.pm.PackageInfoCompat;
+import androidx.core.os.LocaleListCompat;
 import com.google.firebase.messaging.FirebaseMessaging;
 
 import java.io.File;
@@ -38,6 +42,7 @@ public class SettingsActivity extends AppCompatActivity {
         setupNotificationsRow();
         setupSyncRow();
         setupClearCacheRow();
+        setupLanguageRow();
         setupVersionText();
     }
 
@@ -148,6 +153,44 @@ public class SettingsActivity extends AppCompatActivity {
             }
             Toast.makeText(this, "Offline cache cleared", Toast.LENGTH_SHORT).show();
         });
+    }
+
+    // Must match locales_config.xml (minus "System default", which isn't a
+    // real locale - it's LocaleListCompat.getEmptyLocaleList(), meaning
+    // "defer to whatever the phone's system language is").
+    private static final String[] LANGUAGE_LABELS = {"System default", "English", "Kiswahili", "Français", "Luganda"};
+    private static final String[] LANGUAGE_TAGS = {null, "en", "sw", "fr", "lg"};
+
+    private void setupLanguageRow() {
+        View languageRow = findViewById(R.id.languageRow);
+        reflectCurrentLanguage();
+
+        languageRow.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setTitle("App language")
+                .setItems(LANGUAGE_LABELS, (dialog, which) -> {
+                    LocaleListCompat locales = LANGUAGE_TAGS[which] == null
+                            ? LocaleListCompat.getEmptyLocaleList()
+                            : LocaleListCompat.forLanguageTags(LANGUAGE_TAGS[which]);
+                    // This recreates every activity in the task to apply
+                    // immediately (AppCompatDelegate's documented behavior)
+                    // - including this Settings screen itself, so there's
+                    // no separate "restart to apply" step for the person.
+                    AppCompatDelegate.setApplicationLocales(locales);
+                })
+                .show());
+    }
+
+    private int currentLanguageIndex() {
+        String currentTag = AppCompatDelegate.getApplicationLocales().toLanguageTags();
+        for (int i = 1; i < LANGUAGE_TAGS.length; i++) {
+            if (LANGUAGE_TAGS[i].equals(currentTag)) return i;
+        }
+        return 0;
+    }
+
+    private void reflectCurrentLanguage() {
+        TextView valueText = findViewById(R.id.languageValueText);
+        valueText.setText(LANGUAGE_LABELS[currentLanguageIndex()]);
     }
 
     private void setupVersionText() {
