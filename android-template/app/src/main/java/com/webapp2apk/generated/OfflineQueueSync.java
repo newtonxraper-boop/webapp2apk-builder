@@ -139,11 +139,13 @@ final class OfflineQueueSync {
     static final class FlushResult {
         final int succeeded;
         final int remaining;
+        final int dropped;
         final String lastErrorMessage;
 
-        FlushResult(int succeeded, int remaining, String lastErrorMessage) {
+        FlushResult(int succeeded, int remaining, int dropped, String lastErrorMessage) {
             this.succeeded = succeeded;
             this.remaining = remaining;
+            this.dropped = dropped;
             this.lastErrorMessage = lastErrorMessage;
         }
     }
@@ -162,18 +164,26 @@ final class OfflineQueueSync {
             try {
                 lines = readQueueLines(context);
             } catch (Exception e) {
-                return new FlushResult(0, 0, null);
+                return new FlushResult(0, 0, 0, null);
             }
         }
-        if (lines.isEmpty()) return new FlushResult(0, 0, null);
+        if (lines.isEmpty()) return new FlushResult(0, 0, 0, null);
 
         List<String> remaining = new ArrayList<>();
         int succeeded = 0;
+        int dropped = 0;
         String lastError = null;
         for (String line : lines) {
             SubmitResult result = trySubmitQueuedItem(line);
             if (result.success) {
                 succeeded++;
+            } else if (result.permanentFailure) {
+                // Can never succeed no matter how many times it's retried
+                // (bad URL, corrupt queued data) - keeping it would mean
+                // "1 item waiting to sync" never clears and every single
+                // Retry tap fails with the same confusing error forever.
+                dropped++;
+                lastError = result.errorMessage;
             } else {
                 remaining.add(line);
                 lastError = result.errorMessage;
@@ -184,15 +194,17 @@ final class OfflineQueueSync {
             writeQueueLines(context, remaining);
         }
 
-        return new FlushResult(succeeded, remaining.size(), lastError);
+        return new FlushResult(succeeded, remaining.size(), dropped, lastError);
     }
 
     private static final class SubmitResult {
         final boolean success;
+        final boolean permanentFailure;
         final String errorMessage;
 
-        SubmitResult(boolean success, String errorMessage) {
+        SubmitResult(boolean success, boolean permanentFailure, String errorMessage) {
             this.success = success;
+            this.permanentFailure = permanentFailure;
             this.errorMessage = errorMessage;
         }
     }
@@ -200,10 +212,22 @@ final class OfflineQueueSync {
     private static SubmitResult trySubmitQueuedItem(String jsonLine) {
         try {
             JSONObject obj = new JSONObject(jsonLine);
-            String urlStr = obj.getString("url");
+            String urlStr = obj.optString("url", "");
+            // A blank/garbage URL (the "{}" bug this guarded against, or
+            // any similarly broken value from an entry queued before this
+            // check existed) can never succeed no matter how many times
+            // it's retried - treating it as a permanent failure here is
+            // what stops it from sitting in the queue forever, silently
+            // failing on every single retry and permanently showing
+            // "1 item waiting to sync" with no way to clear it.
+            if (urlStr.isEmpty() || !(urlStr.startsWith("http://") || urlStr.startsWith("https://"))) {
+                return new SubmitResult(false, true, "Invalid queued URL: " + urlStr);
+            }
+
             String method = obj.optString("method", "POST");
             String enctype = obj.optString("enctype", "application/x-www-form-urlencoded");
-            JSONArray fields = obj.getJSONArray("fields");
+            JSONArray fields = obj.optJSONArray("fields");
+            if (fields == null) fields = new JSONArray();
 
             boolean hasFile = false;
             for (int i = 0; i < fields.length(); i++) {
@@ -234,13 +258,21 @@ final class OfflineQueueSync {
             int status = conn.getResponseCode();
             conn.disconnect();
             if (status >= 200 && status < 400) {
-                return new SubmitResult(true, null);
+                return new SubmitResult(true, false, null);
             }
-            return new SubmitResult(false, "HTTP " + status + " from server for " + urlStr);
+            // A 4xx/5xx here is the server's call, not something to give
+            // up on locally - a 401 from a stale offline session cookie,
+            // for instance, can still succeed on a later retry once a
+            // fresh login happens. Only the technical faults above (a
+            // malformed URL, corrupt queued JSON) are treated as
+            // permanent, since retrying those can never help.
+            return new SubmitResult(false, false, "HTTP " + status + " from server for " + urlStr);
         } catch (Exception e) {
             String msg = e.getClass().getSimpleName();
             if (e.getMessage() != null) msg += ": " + e.getMessage();
-            return new SubmitResult(false, msg);
+            boolean permanent = e instanceof java.net.MalformedURLException
+                    || e instanceof org.json.JSONException;
+            return new SubmitResult(false, permanent, msg);
         }
     }
 

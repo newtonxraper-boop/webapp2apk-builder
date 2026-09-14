@@ -1041,7 +1041,27 @@ public class MainActivity extends AppCompatActivity {
                 "  })).then(function(list){return list.filter(function(x){return x;});});" +
                 "}" +
                 "function queueSubmission(url,method,fields,enctype){" +
-                "  var payload=JSON.stringify({url:url,method:method,enctype:enctype,fields:fields,ts:Date.now()});" +
+                // Guards against exactly the kind of bug that produces a
+                // permanently-stuck sync item: some page code accidentally
+                // passing a stringified object ("{}", "[object Object]")
+                // instead of a real URL. A garbage string like "{}" is
+                // NOT caught by just try/catching new URL() - resolved
+                // against the current page it's a perfectly legal relative
+                // path ("https://site/%7B%7D") and would silently queue an
+                // item that can never actually be delivered. Checking the
+                // raw value is a string that doesn't start with '{' or '['
+                // catches that case before it ever reaches the queue.
+                "  if(typeof url!=='string'||!url||url.charAt(0)==='{'||url.charAt(0)==='['){" +
+                "    console.warn('w2a offline queue: refusing to queue invalid url',url);" +
+                "    return false;" +
+                "  }" +
+                "  var resolved;" +
+                "  try{resolved=new URL(url,location.href).href;}catch(e){resolved=null;}" +
+                "  if(!resolved){" +
+                "    console.warn('w2a offline queue: refusing to queue invalid url',url);" +
+                "    return false;" +
+                "  }" +
+                "  var payload=JSON.stringify({url:resolved,method:method,enctype:enctype,fields:fields,ts:Date.now()});" +
                 "  if(window.AndroidOfflineQueue&&window.AndroidOfflineQueue.enqueue){" +
                 "    window.AndroidOfflineQueue.enqueue(payload);" +
                 "    return true;" +
@@ -1067,6 +1087,8 @@ public class MainActivity extends AppCompatActivity {
                 "      var queued=queueSubmission(url,method,fields,enctype);" +
                 "      if(queued&&window.AndroidOfflineQueue&&window.AndroidOfflineQueue.onQueued){" +
                 "        window.AndroidOfflineQueue.onQueued();" +
+                "      }else if(!queued&&window.AndroidOfflineQueue&&window.AndroidOfflineQueue.onQueueFailed){" +
+                "        window.AndroidOfflineQueue.onQueueFailed();" +
                 "      }" +
                 "    });" +
                 "    return;" +
@@ -1110,23 +1132,24 @@ public class MainActivity extends AppCompatActivity {
                 "  var p;" +
                 "  if(typeof FormData!=='undefined'&&body instanceof FormData){" +
                 "    p=serializeFormData(body).then(function(fields){" +
-                "      queueSubmission(url,method,fields,'multipart/form-data');" +
+                "      return queueSubmission(url,method,fields,'multipart/form-data');" +
                 "    });" +
                 "  }else if(typeof URLSearchParams!=='undefined'&&body instanceof URLSearchParams){" +
                 "    var fields=[];" +
                 "    body.forEach(function(value,key){fields.push({key:key,type:'text',value:String(value)});});" +
-                "    queueSubmission(url,method,fields,'application/x-www-form-urlencoded');" +
-                "    p=Promise.resolve();" +
+                "    p=Promise.resolve(queueSubmission(url,method,fields,'application/x-www-form-urlencoded'));" +
                 "  }else if(typeof body==='string'&&body.length>0){" +
-                "    queueSubmission(url,method,[{key:'body',type:'text',value:body}],'raw');" +
-                "    p=Promise.resolve();" +
+                "    p=Promise.resolve(queueSubmission(url,method,[{key:'body',type:'text',value:body}],'raw'));" +
                 "  }else{" +
-                "    p=Promise.resolve();" +
+                "    p=Promise.resolve(true);" +
                 "  }" +
-                "  return p.then(function(){" +
-                "    if(window.AndroidOfflineQueue&&window.AndroidOfflineQueue.onQueued){" +
+                "  return p.then(function(queued){" +
+                "    if(queued&&window.AndroidOfflineQueue&&window.AndroidOfflineQueue.onQueued){" +
                 "      window.AndroidOfflineQueue.onQueued();" +
+                "    }else if(!queued&&window.AndroidOfflineQueue&&window.AndroidOfflineQueue.onQueueFailed){" +
+                "      window.AndroidOfflineQueue.onQueueFailed();" +
                 "    }" +
+                "    return queued;" +
                 "  });" +
                 "}" +
                 "var originalFetch=window.fetch;" +
@@ -1305,6 +1328,17 @@ public class MainActivity extends AppCompatActivity {
             });
             OfflineQueueWorker.scheduleIfNeeded(getApplicationContext());
         }
+
+        @android.webkit.JavascriptInterface
+        public void onQueueFailed() {
+            // The page tried to save something offline, but queueSubmission()
+            // rejected it (an invalid/garbage URL, almost always a bug in the
+            // page's own AJAX call rather than a real network problem) -
+            // this is the one case where offline queuing genuinely can't
+            // help, so it's better to say so plainly than to look like the
+            // save silently succeeded.
+            runOnUiThread(() -> showSnackbar("Could not save this - please try again"));
+        }
     }
 
     private void queueSubmission(String json) {
@@ -1347,11 +1381,24 @@ public class MainActivity extends AppCompatActivity {
             OfflineQueueSync.FlushResult result = OfflineQueueSync.flush(this);
             final int finalSucceeded = result.succeeded;
             final int finalRemaining = result.remaining;
+            final int finalDropped = result.dropped;
             final String lastError = result.lastErrorMessage;
             runOnUiThread(() -> {
                 updateSyncBanner(finalRemaining);
                 if (finalSucceeded > 0) {
                     showSnackbar(finalSucceeded == 1 ? "1 saved item sent" : finalSucceeded + " saved items sent");
+                } else if (finalDropped > 0) {
+                    // Distinct from a normal send failure: this item could
+                    // never have succeeded no matter how many times it was
+                    // retried (a broken URL, corrupt queued data), so it's
+                    // been discarded rather than left to fail forever on
+                    // every future Retry tap. Logged with the original
+                    // error so it's still traceable if this keeps
+                    // happening for the same page action.
+                    showSnackbar(finalDropped == 1
+                            ? "1 item couldn't be sent and was discarded"
+                            : finalDropped + " items couldn't be sent and were discarded");
+                    android.util.Log.w("OfflineQueue", "Dropped unrecoverable item(s): " + lastError);
                 } else if (finalRemaining > 0 && lastError != null) {
                     // Previously silent on failure - now shows exactly why so
                     // it doesn't look like nothing happened when it actually

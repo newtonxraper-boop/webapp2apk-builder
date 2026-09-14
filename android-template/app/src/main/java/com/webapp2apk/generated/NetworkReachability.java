@@ -41,34 +41,75 @@ final class NetworkReachability {
         return probe(appUrl);
     }
 
+    private static final int MAX_SAME_HOST_REDIRECTS = 3;
+
     static boolean probe(String urlString) {
+        try {
+            return probeOnce(urlString, "HEAD", true, MAX_SAME_HOST_REDIRECTS);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static boolean probeOnce(String urlString, String method, boolean allowMethodFallback, int redirectsLeft) throws Exception {
+        URL url = new URL(urlString);
         HttpURLConnection conn = null;
         try {
-            conn = (HttpURLConnection) new URL(urlString).openConnection();
+            conn = (HttpURLConnection) url.openConnection();
             conn.setConnectTimeout(TIMEOUT_MS);
             conn.setReadTimeout(TIMEOUT_MS);
-            conn.setRequestMethod("HEAD");
-            conn.setInstanceFollowRedirects(true);
+            conn.setRequestMethod(method);
+            // Handle redirects ourselves instead of letting the platform
+            // follow them silently. A captive portal (MTN's expired-data
+            // "top up" page, an airport Wi-Fi login page, etc.) works by
+            // transparently redirecting every request to ITS OWN domain -
+            // if we just followed that redirect and saw a 200 come back, as
+            // the default auto-follow behavior would, we'd wrongly report
+            // "reachable" precisely in the one situation this probe exists
+            // to catch. A redirect is only trusted as a real, benign
+            // same-site redirect (http->https, /->/login, etc.) when its
+            // target host matches the host we actually asked for.
+            conn.setInstanceFollowRedirects(false);
+
             int status = conn.getResponseCode();
+
             if (status == 405 || status == 501) {
-                // Server doesn't support HEAD - retry with a real GET
-                // before giving up, rather than reporting a false offline.
-                conn.disconnect();
-                conn = (HttpURLConnection) new URL(urlString).openConnection();
-                conn.setConnectTimeout(TIMEOUT_MS);
-                conn.setReadTimeout(TIMEOUT_MS);
-                conn.setRequestMethod("GET");
-                status = conn.getResponseCode();
+                if (allowMethodFallback) {
+                    conn.disconnect();
+                    return probeOnce(urlString, "GET", false, redirectsLeft);
+                }
+                return false;
             }
-            // Anything that isn't a hard connection failure counts as
+
+            if (status >= 300 && status < 400) {
+                if (redirectsLeft <= 0) return false;
+                String location = conn.getHeaderField("Location");
+                if (location == null) return false;
+                String redirectHost;
+                try {
+                    redirectHost = new URL(url, location).getHost();
+                } catch (Exception e) {
+                    return false;
+                }
+                String originalHost = url.getHost();
+                if (redirectHost == null || originalHost == null || !redirectHost.equalsIgnoreCase(originalHost)) {
+                    // Redirected off to a different domain entirely - the
+                    // captive-portal / DNS-hijack signature. The real site
+                    // is not actually reachable right now.
+                    return false;
+                }
+                // Same-host redirect (e.g. http -> https) - follow it once
+                // ourselves and evaluate that response instead.
+                return probeOnce(new URL(url, location).toString(), method, allowMethodFallback, redirectsLeft - 1);
+            }
+
+            // Anything else that isn't a hard connection failure counts as
             // "reachable" here, including 4xx/5xx from the app itself - a
             // 500 error page still proves the network path and DNS/TLS to
             // the domain work, which is what this probe exists to confirm;
             // it's the offline queue's job to decide whether a specific
             // request actually succeeded, not this reachability check.
             return status > 0;
-        } catch (Exception e) {
-            return false;
         } finally {
             if (conn != null) conn.disconnect();
         }

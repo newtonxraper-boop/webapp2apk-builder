@@ -120,11 +120,15 @@ public class SettingsActivity extends AppCompatActivity {
             OfflineQueueSync.FlushResult result = OfflineQueueSync.flush(this);
             runOnUiThread(() -> {
                 refreshSyncStatus();
-                Toast.makeText(this,
-                        result.succeeded > 0
-                                ? result.succeeded + " change(s) sent"
-                                : "Nothing to send right now",
-                        Toast.LENGTH_SHORT).show();
+                String message;
+                if (result.succeeded > 0) {
+                    message = result.succeeded + " change(s) sent";
+                } else if (result.dropped > 0) {
+                    message = result.dropped + " item(s) couldn't be sent and were discarded";
+                } else {
+                    message = "Nothing to send right now";
+                }
+                Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
             });
         }).start());
     }
