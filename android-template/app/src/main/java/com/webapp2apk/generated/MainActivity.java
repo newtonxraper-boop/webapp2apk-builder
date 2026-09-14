@@ -1158,7 +1158,23 @@ public class MainActivity extends AppCompatActivity {
                 "    init=init||{};" +
                 "    var method=(init.method||'GET').toUpperCase();" +
                 "    if(method==='GET'||!w2aIsOffline()){return originalFetch(input,init);}" +
-                "    var url=typeof input==='string'?input:input.url;" +
+                "    var url;" +
+                // This only ever runs on the offline path (see the branch
+                // above) - fetch(input) accepts a plain string, a Request
+                // object (which has .url), or a URL object (which has
+                // .href, NOT .url - that gap is exactly what caused a
+                // legitimate fetch(someUrlObject, ...) call to get silently
+                // rejected as "invalid" only while offline, even though
+                // the exact same call works fine online since the browser's
+                // real fetch() handles all three natively). Falling back to
+                // String(input) as a last resort covers anything else
+                // (e.g. a custom object with a toString()) rather than
+                // giving up outright.
+                "    if(typeof input==='string'){url=input;}" +
+                "    else if(input&&typeof input.url==='string'){url=input.url;}" +
+                "    else if(input&&typeof input.href==='string'){url=input.href;}" +
+                "    else if(input){url=String(input);}" +
+                "    else{url='';}" +
                 "    return w2aQueueBody(url,method,init.body,'raw').then(function(){" +
                 // Resolve as if the request succeeded, rather than rejecting the
                 // promise. The change is safely queued on-device and will really be
@@ -1179,7 +1195,10 @@ public class MainActivity extends AppCompatActivity {
                 "  var origSetHeader=OrigXHR.prototype.setRequestHeader;" +
                 "  OrigXHR.prototype.open=function(method,url){" +
                 "    this.__w2aMethod=(method||'GET').toUpperCase();" +
-                "    this.__w2aUrl=url;" +
+                "    if(typeof url==='string'){this.__w2aUrl=url;}" +
+                "    else if(url&&typeof url.href==='string'){this.__w2aUrl=url.href;}" +
+                "    else if(url){this.__w2aUrl=String(url);}" +
+                "    else{this.__w2aUrl='';}" +
                 "    return origOpen.apply(this,arguments);" +
                 "  };" +
                 "  OrigXHR.prototype.setRequestHeader=function(name,value){" +
