@@ -1,0 +1,135 @@
+name: Build Desktop App
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "'windows' or 'macos'"
+        required: true
+        default: 'windows'
+      app_name:
+        description: 'App Name'
+        required: false
+        default: 'WebApp'
+      app_url:
+        description: 'App URL'
+        required: false
+        default: 'https://example.com'
+      package_name:
+        description: 'Package Name / appId (e.g. com.example.myapp). Leave blank to auto-generate from App Name.'
+        required: false
+        default: ''
+      request_id:
+        description: 'Internal request/build ID (optional)'
+        required: false
+        default: ''
+      icon_url:
+        description: 'Public URL to the uploaded app icon (PNG/JPG)'
+        required: false
+        default: ''
+      primary_color:
+        description: 'Primary hex color, e.g. #3DDC84'
+        required: false
+        default: '#3DDC84'
+
+jobs:
+  build:
+    # A single workflow file, but it actually runs on a Windows or a macOS
+    # GitHub-hosted runner depending on the "platform" input - each needs
+    # its own native OS to produce a real .exe or .dmg.
+    runs-on: ${{ inputs.platform == 'macos' && 'macos-latest' || 'windows-latest' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install icon-processing helper (jimp, pure JS - no native deps to fail on any OS)
+        run: npm install
+        working-directory: scripts
+
+      - name: Generate app resources
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+          APP_URL: ${{ inputs.app_url }}
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          ICON_URL: ${{ inputs.icon_url }}
+          PRIMARY_COLOR: ${{ inputs.primary_color }}
+        run: node scripts/generate_desktop_resources.js
+
+      - name: Show generated config files (debug)
+        shell: bash
+        run: |
+          echo "----- electron-template/package.json -----"
+          cat electron-template/package.json
+          echo "----- electron-template/src/main.js (first 20 lines) -----"
+          head -n 20 electron-template/src/main.js
+
+      - name: Install dependencies
+        run: npm install
+        working-directory: electron-template
+
+      - name: Build Windows installer (.exe)
+        if: inputs.platform == 'windows'
+        run: npx electron-builder --win nsis --publish=never
+        working-directory: electron-template
+
+      - name: Build macOS app (.dmg + .zip, unsigned)
+        if: inputs.platform == 'macos'
+        env:
+          # No Apple Developer certificate is configured, so explicitly
+          # tell electron-builder not to go looking for one (and not to
+          # attempt ad-hoc signing) - without this, the build can fail
+          # trying to codesign against a certificate that doesn't exist.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --mac dmg zip --publish=never
+        working-directory: electron-template
+
+      - name: Locate built artifact
+        id: artifact
+        shell: bash
+        run: |
+          DIST=electron-template/dist
+          if [ "${{ inputs.platform }}" = "windows" ]; then
+            FOUND=$(find "$DIST" -maxdepth 1 -iname '*.exe' | head -n1)
+            EXT=exe
+          else
+            FOUND=$(find "$DIST" -maxdepth 1 -iname '*.dmg' | head -n1)
+            EXT=dmg
+            if [ -z "$FOUND" ]; then
+              FOUND=$(find "$DIST" -maxdepth 1 -iname '*.zip' | head -n1)
+              EXT=zip
+            fi
+          fi
+          if [ -z "$FOUND" ]; then
+            echo "::error::No built artifact found in $DIST"
+            ls -la "$DIST" || true
+            exit 1
+          fi
+          echo "path=$FOUND" >> "$GITHUB_OUTPUT"
+          echo "ext=$EXT" >> "$GITHUB_OUTPUT"
+          echo "Found artifact: $FOUND"
+
+      - name: Upload artifact (GitHub Actions run page)
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ inputs.platform }}
+          path: ${{ steps.artifact.outputs.path }}
+          if-no-files-found: error
+
+      - name: Deliver artifact to website
+        env:
+          RECEIVE_URL: ${{ secrets.RECEIVE_URL }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+        if: env.RECEIVE_URL != ''
+        shell: bash
+        run: |
+          curl -sS -f -X POST "$RECEIVE_URL" \
+            -F "token=$CALLBACK_SECRET" \
+            -F "request_id=${{ inputs.request_id }}" \
+            -F "ext=${{ steps.artifact.outputs.ext }}" \
+            -F "file=@${{ steps.artifact.outputs.path }}"
+          echo "Delivered ${{ inputs.platform }} artifact to website"
