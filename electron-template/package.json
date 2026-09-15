@@ -1,0 +1,49 @@
+{
+  "name": "{{PACKAGE_SLUG}}",
+  "productName": "{{APP_NAME}}",
+  "version": "1.0.0",
+  "description": "{{APP_NAME}} desktop app",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "build:win": "electron-builder --win nsis --publish=never",
+    "build:mac": "electron-builder --mac dmg zip --publish=never"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "{{PACKAGE_NAME}}",
+    "productName": "{{APP_NAME}}",
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "icon": "build/icon.png",
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ],
+      "category": "public.app-category.utilities",
+      "hardenedRuntime": false,
+      "identity": null
+    }
+  }
+}

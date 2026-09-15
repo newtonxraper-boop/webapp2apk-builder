@@ -1,0 +1,9 @@
+{
+  "name": "webapp2apk-build-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Helper scripts run by the GitHub Actions build workflows (not part of the produced app).",
+  "dependencies": {
+    "jimp": "^0.22.12"
+  }
+}
