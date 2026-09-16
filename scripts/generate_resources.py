@@ -230,6 +230,7 @@ def main():
     splash_enabled = bool_literal("SPLASH_ENABLED", True)
     push_enabled = bool_literal("PUSH_ENABLED", False)
     filecamera_enabled = bool_literal("FILECAMERA_ENABLED", True)
+    kiosk_enabled = bool_literal("KIOSK_ENABLED", False)
 
     # A Unix timestamp is always higher than the previous build's, which is
     # exactly what versionCode needs to be for Android's own update-comparison
@@ -258,6 +259,7 @@ def main():
         "{{SPLASH_ENABLED}}": splash_enabled,
         "{{PUSH_ENABLED}}": push_enabled,
         "{{FILECAMERA_ENABLED}}": filecamera_enabled,
+        "{{KIOSK_ENABLED}}": kiosk_enabled,
         "{{VERSION_CODE}}": version_code,
         # Both optional and empty by default - most target web apps won't
         # have a crash_report.php endpoint or a dedicated privacy policy
@@ -303,7 +305,7 @@ def main():
     print(f"App URL: {app_url}")
     print(f"Package name (applicationId): {package_name}")
     print(f"Primary color: {primary_color}  Primary dark: {primary_dark_color}  Accent: {accent_color}")
-    print(f"splash_enabled={splash_enabled} push_enabled={push_enabled} filecamera_enabled={filecamera_enabled}")
+    print(f"splash_enabled={splash_enabled} push_enabled={push_enabled} filecamera_enabled={filecamera_enabled} kiosk_enabled={kiosk_enabled}")
     print(f"Nav tabs: {nav_tab_count}")
     print(f"Custom icon applied: {icon_applied}")
     print(f"Text files updated: {len(updated_files)}")

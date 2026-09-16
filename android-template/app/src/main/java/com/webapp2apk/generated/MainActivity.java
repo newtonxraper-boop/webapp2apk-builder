@@ -1,6 +1,8 @@
 package com.webapp2apk.generated;
 
 import android.Manifest;
+import android.app.PendingIntent;
+import android.os.Parcelable;
 import android.annotation.SuppressLint;
 import android.app.DownloadManager;
 import android.content.Intent;
@@ -49,7 +51,24 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
-import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+
+import com.google.android.gms.location.CurrentLocationRequest;
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.Geofence;
+import com.google.android.gms.location.GeofencingClient;
+import com.google.android.gms.location.GeofencingRequest;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.Priority;
+import com.google.android.gms.tasks.CancellationTokenSource;
+import com.journeyapps.barcodescanner.ScanContract;
+import com.journeyapps.barcodescanner.ScanIntentResult;
+import com.journeyapps.barcodescanner.ScanOptions;
+
+import android.nfc.NdefMessage;
+import android.nfc.NfcAdapter;
+import android.nfc.Tag;
+import android.nfc.tech.Ndef;
+import android.nfc.tech.NdefFormatable;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -67,14 +86,24 @@ import java.net.URL;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
 
+    // Set in onResume, cleared in onPause - lets GeofenceBroadcastReceiver
+    // forward a geofence event live to this Activity's WebView when it
+    // happens to be open, without holding a permanent reference anywhere
+    // that could leak the Activity.
+    private static volatile MainActivity activeInstance;
+
+    static MainActivity getActiveInstance() {
+        return activeInstance;
+    }
+
     private WebView webView;
-    private SwipeRefreshLayout swipeRefresh;
     private ProgressBar progressBar;
     private View progressBarIcon;
     private LinearLayout bottomTabBar;
@@ -92,6 +121,18 @@ public class MainActivity extends AppCompatActivity {
 
     private String homeUrl;
     private boolean filecameraEnabled;
+    private boolean kioskEnabled;
+
+    // NFC tap bridge state (see NfcBridge.java / nfc lifecycle methods below).
+    private NfcAdapter nfcAdapter;
+    private volatile String pendingNfcWriteText;
+
+    // Location & geofencing bridge state (see LocationBridge.java).
+    private FusedLocationProviderClient fusedLocationClient;
+    private GeofencingClient geofencingClient;
+    private ActivityResultLauncher<String[]> locationPermissionLauncher;
+    private ActivityResultLauncher<ScanOptions> qrScanLauncher;
+    private Runnable pendingLocationAction;
 
     private ValueCallback<Uri[]> filePathCallback;
     private ActivityResultLauncher<Intent> fileChooserLauncher;
@@ -166,7 +207,6 @@ public class MainActivity extends AppCompatActivity {
         applyImmersiveTheming();
 
         webView = findViewById(R.id.webview);
-        swipeRefresh = findViewById(R.id.swipeRefresh);
         progressBar = findViewById(R.id.progressBar);
         progressBarIcon = findViewById(R.id.progressBarIcon);
         bottomTabBar = findViewById(R.id.bottomTabBar);
@@ -195,6 +235,11 @@ public class MainActivity extends AppCompatActivity {
         JSONObject config = App.appConfig;
         homeUrl = config.optString("app_url", getString(R.string.app_url));
         filecameraEnabled = config.optBoolean("filecamera_enabled", true);
+        kioskEnabled = config.optBoolean("kiosk_enabled", false);
+
+        nfcAdapter = NfcAdapter.getDefaultAdapter(this);
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+        geofencingClient = LocationServices.getGeofencingClient(this);
 
         String shortcutUrl = getIntent() != null ? getIntent().getStringExtra("shortcut_url") : null;
         String deepLinkUrl = resolveDeepLinkUrl(getIntent());
@@ -219,7 +264,6 @@ public class MainActivity extends AppCompatActivity {
         setupRefreshButton();
         setupSettingsButton();
         setupConnectivityBanner();
-        setupSwipeRefresh();
         setupBottomTabs();
         checkForAppUpdate();
         maybeShowLockScreen();
@@ -237,6 +281,7 @@ public class MainActivity extends AppCompatActivity {
             currentActiveUrl = deepLinkUrl;
             webView.loadUrl(deepLinkUrl);
         }
+        handleNfcIntentIfAny(intent);
     }
 
     /**
@@ -265,6 +310,8 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         super.onPause();
+        activeInstance = null;
+        disableNfcForegroundDispatch();
         webView.onPause();
         webView.pauseTimers();
         CookieManager.getInstance().flush();
@@ -275,6 +322,9 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        activeInstance = this;
+        enableNfcForegroundDispatch();
+        maybeEnterKioskMode();
         maybeShowLockScreen();
         webView.onResume();
         webView.resumeTimers();
@@ -297,6 +347,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (activeInstance == this) activeInstance = null;
         stopWebViewWatchdog();
         cancelQueueRetry();
         if (networkCallback != null && connectivityCallbackRegistered) {
@@ -403,6 +454,28 @@ public class MainActivity extends AppCompatActivity {
                     // without unlocking.
                     lockScreenShowing = false;
                 });
+
+        qrScanLauncher = registerForActivityResult(new ScanContract(), result -> {
+            ScanIntentResult scanResult = result;
+            if (scanResult.getContents() != null) {
+                deliverQrResult(scanResult.getContents(), null);
+            } else {
+                deliverQrResult(null, "cancelled");
+            }
+        });
+
+        locationPermissionLauncher = registerForActivityResult(
+                new ActivityResultContracts.RequestMultiplePermissions(),
+                grants -> {
+                    boolean granted = Boolean.TRUE.equals(grants.get(Manifest.permission.ACCESS_FINE_LOCATION))
+                            || Boolean.TRUE.equals(grants.get(Manifest.permission.ACCESS_COARSE_LOCATION));
+                    if (granted) {
+                        runPendingLocationAction();
+                    } else {
+                        deliverLocationError("permission_denied");
+                        pendingLocationAction = null;
+                    }
+                });
     }
 
     /**
@@ -451,12 +524,22 @@ public class MainActivity extends AppCompatActivity {
         // Call from the page as: AndroidShare.shareText("...") or
         // AndroidShare.shareFileBase64(base64Data, "receipt.pdf", "application/pdf").
         webView.addJavascriptInterface(new ShareBridge(this), "AndroidShare");
+        // Print bridge - window.print() on the site gets overridden (see
+        // onPageFinished below) to call this instead.
+        webView.addJavascriptInterface(new PrintBridge(this, webView), "AndroidPrint");
+        // QR/barcode scanner - AndroidScanQR.scan() from the page's JS.
+        webView.addJavascriptInterface(new QrScanBridge(this), "AndroidScanQR");
+        // NFC tap bridge - AndroidNfc.isAvailable() / writeTextOnNextTap(...).
+        webView.addJavascriptInterface(new NfcBridge(this), "AndroidNfc");
+        // Device-only scheduled reminders, no server/push needed.
+        webView.addJavascriptInterface(new LocalNotifyBridge(this), "AndroidNotify");
+        // One-shot location + geofencing.
+        webView.addJavascriptInterface(new LocationBridge(this), "AndroidLocation");
 
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
         cookieManager.setAcceptThirdPartyCookies(webView, true);
 
-        swipeRefresh.setColorSchemeColors(ContextCompat.getColor(this, R.color.accent_color));
 
         webView.setWebViewClient(new WebViewClient() {
             private boolean cacheRetryInProgress = false;
@@ -573,7 +656,6 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                swipeRefresh.setRefreshing(false);
 
                 Uri currentUri = url != null ? Uri.parse(url) : null;
                 boolean cameFromLogin = lastPageUrl != null && isSensitiveUrl(Uri.parse(lastPageUrl));
@@ -591,6 +673,7 @@ public class MainActivity extends AppCompatActivity {
                 lastPageUrl = url;
 
                 injectOfflineQueueScript(view, url);
+                injectPrintOverrideScript(view);
 
                 final long visualStateRequestId = System.currentTimeMillis();
                 final boolean[] revealed = {false};
@@ -626,7 +709,7 @@ public class MainActivity extends AppCompatActivity {
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onProgressChanged(WebView view, int newProgress) {
-                if (newProgress >= 100) swipeRefresh.setRefreshing(false);
+                // Pull-to-refresh removed - nothing to update here anymore.
             }
 
             @Override
@@ -935,25 +1018,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void setupSwipeRefresh() {
-        // Previously disabled outright - a bare webView.reload() on pull
-        // would have silently done nothing useful while offline (it would
-        // just re-show the same cached/offline page with no feedback).
-        // Routing it through attemptRealRefresh() gives pull-to-refresh the
-        // same "recheck connectivity, retry the real URL if we were on the
-        // offline placeholder, flush the queue if we're back online" logic
-        // the existing refresh button and JS retry bridge already use.
-        swipeRefresh.setEnabled(true);
-        swipeRefresh.setOnRefreshListener(() -> {
-            swipeRefresh.setRefreshing(true);
-            attemptRealRefresh();
-            // onPageFinished() already calls swipeRefresh.setRefreshing(false)
-            // once the reload actually completes; this is just a safety net
-            // in case the page was already fully loaded (WebView won't fire
-            // onPageFinished again for an identical reload in every case).
-            swipeRefresh.postDelayed(() -> swipeRefresh.setRefreshing(false), 3000);
-        });
-    }
 
     private static final long MAX_QUEUEABLE_FILE_BYTES = 4L * 1024 * 1024;
 
@@ -1272,6 +1336,289 @@ public class MainActivity extends AppCompatActivity {
                 "})();";
 
         view.evaluateJavascript(script, null);
+    }
+
+    /**
+     * Redirects window.print() to AndroidPrint.printPage() so a site's
+     * existing "Print" button (using the standard, ubiquitous window.print()
+     * API) works with zero changes on the site's side. Installed once per
+     * page load, guarded the same way injectOfflineQueueScript is.
+     */
+    private void injectPrintOverrideScript(WebView view) {
+        String script =
+                "(function(){" +
+                "if(window.__w2aPrintInstalled)return;" +
+                "window.__w2aPrintInstalled=true;" +
+                "if(window.AndroidPrint){" +
+                "  window.print=function(){ AndroidPrint.printPage(); };" +
+                "}" +
+                "})();";
+        view.evaluateJavascript(script, null);
+    }
+
+    // ---------------------------------------------------------------
+    // QR / barcode scanner (window.AndroidScanQR - see QrScanBridge.java)
+    // ---------------------------------------------------------------
+
+    void launchQrScanner() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            // Same CAMERA permission the WebView's own file/camera capture
+            // inputs already use (declared once in the manifest) - this is
+            // just a separate runtime prompt for it, triggered the first
+            // time the page actually calls AndroidScanQR.scan().
+            requestPermissions(new String[]{Manifest.permission.CAMERA}, 9001);
+            return;
+        }
+        ScanOptions options = new ScanOptions();
+        options.setBeepEnabled(true);
+        options.setOrientationLocked(false);
+        options.setCaptureActivity(com.journeyapps.barcodescanner.CaptureActivity.class);
+        qrScanLauncher.launch(options);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 9001) {
+            boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            if (granted) {
+                launchQrScanner();
+            } else {
+                deliverQrResult(null, "permission_denied");
+            }
+        }
+    }
+
+    private void deliverQrResult(String text, String error) {
+        if (webView == null) return;
+        String script;
+        if (text != null) {
+            script = "window.onQRScanResult && window.onQRScanResult(" + jsQuote(text) + ");";
+        } else {
+            script = "window.onQRScanError && window.onQRScanError(" + jsQuote(error) + ");";
+        }
+        webView.evaluateJavascript(script, null);
+    }
+
+    private static String jsQuote(String value) {
+        if (value == null) value = "";
+        try {
+            return org.json.JSONObject.quote(value);
+        } catch (Exception e) {
+            return "\"\"";
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // NFC tap bridge (window.AndroidNfc - see NfcBridge.java)
+    // ---------------------------------------------------------------
+
+    boolean isNfcAvailable() {
+        return nfcAdapter != null && nfcAdapter.isEnabled();
+    }
+
+    void armPendingNfcWrite(String text) {
+        pendingNfcWriteText = text;
+        showSnackbar("Tap a tag now to write to it");
+    }
+
+    private void enableNfcForegroundDispatch() {
+        if (nfcAdapter == null) return;
+        Intent intent = new Intent(this, getClass()).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent pendingIntent = PendingIntent.getActivity(
+                this, 0, intent, PendingIntent.FLAG_MUTABLE);
+        try {
+            nfcAdapter.enableForegroundDispatch(this, pendingIntent, null, null);
+        } catch (Exception ignored) {
+            // Some OEM NFC stacks throw if NFC was just toggled off in
+            // Settings - never worth crashing over.
+        }
+    }
+
+    private void disableNfcForegroundDispatch() {
+        if (nfcAdapter == null) return;
+        try {
+            nfcAdapter.disableForegroundDispatch(this);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void handleNfcIntentIfAny(Intent intent) {
+        if (intent == null || nfcAdapter == null) return;
+        Tag tag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG);
+        if (tag == null) return;
+
+        if (pendingNfcWriteText != null) {
+            String toWrite = pendingNfcWriteText;
+            pendingNfcWriteText = null;
+            boolean wrote = writeTextToTag(tag, toWrite);
+            showSnackbar(wrote ? "Tag written" : "Could not write to this tag");
+            deliverNfcTag(toWrite, tag);
+            return;
+        }
+
+        NdefMessage[] messages = null;
+        Parcelable[] raw = intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES);
+        if (raw != null) {
+            messages = new NdefMessage[raw.length];
+            for (int i = 0; i < raw.length; i++) messages[i] = (NdefMessage) raw[i];
+        }
+        String text = (messages != null && messages.length > 0) ? NfcBridge.readTextFrom(messages[0]) : "";
+        deliverNfcTag(text, tag);
+    }
+
+    private boolean writeTextToTag(Tag tag, String text) {
+        NdefMessage message = NfcBridge.buildTextMessage(text);
+        try {
+            Ndef ndef = Ndef.get(tag);
+            if (ndef != null) {
+                ndef.connect();
+                ndef.writeNdefMessage(message);
+                ndef.close();
+                return true;
+            }
+            NdefFormatable formatable = NdefFormatable.get(tag);
+            if (formatable != null) {
+                formatable.connect();
+                formatable.format(message);
+                formatable.close();
+                return true;
+            }
+        } catch (Exception ignored) {
+            // Tag pulled away mid-write, read-only tag, unsupported tech -
+            // all treated the same: the write just didn't happen.
+        }
+        return false;
+    }
+
+    private void deliverNfcTag(String text, Tag tag) {
+        if (webView == null) return;
+        String tagId = NfcBridge.tagIdToHex(tag);
+        String script = "window.onNfcTag && window.onNfcTag(" + jsQuote(text) + "," + jsQuote(tagId) + ");";
+        webView.evaluateJavascript(script, null);
+    }
+
+    // ---------------------------------------------------------------
+    // Kiosk mode (screen pinning) - build-time toggle, kiosk_enabled
+    // ---------------------------------------------------------------
+
+    /**
+     * Screen pinning (Activity.startLockTask()) needs no special permission
+     * or device-owner setup - any app can call it. The person can always
+     * exit it via Android's own back+recents-button hold gesture, which is
+     * a system-level escape hatch this code has no control over and isn't
+     * trying to remove.
+     */
+    private void maybeEnterKioskMode() {
+        if (!kioskEnabled) return;
+        try {
+            startLockTask();
+        } catch (Exception ignored) {
+            // Already pinned, or this OEM's launcher blocks it - either way,
+            // not worth crashing over.
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Location & geofencing (window.AndroidLocation - see LocationBridge.java)
+    // ---------------------------------------------------------------
+
+    private boolean hasLocationPermission() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                || ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void runPendingLocationAction() {
+        if (pendingLocationAction != null) {
+            Runnable action = pendingLocationAction;
+            pendingLocationAction = null;
+            action.run();
+        }
+    }
+
+    void requestCurrentLocation() {
+        if (!hasLocationPermission()) {
+            pendingLocationAction = this::requestCurrentLocation;
+            locationPermissionLauncher.launch(new String[]{
+                    Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION});
+            return;
+        }
+        try {
+            CancellationTokenSource cancelSource = new CancellationTokenSource();
+            CurrentLocationRequest request = new CurrentLocationRequest.Builder()
+                    .setPriority(Priority.PRIORITY_BALANCED_POWER_ACCURACY)
+                    .build();
+            fusedLocationClient.getCurrentLocation(request, cancelSource.getToken())
+                    .addOnSuccessListener(location -> {
+                        if (location != null) {
+                            deliverLocationResult(location.getLatitude(), location.getLongitude(), location.getAccuracy());
+                        } else {
+                            deliverLocationError("unavailable");
+                        }
+                    })
+                    .addOnFailureListener(e -> deliverLocationError("failed"));
+        } catch (SecurityException e) {
+            deliverLocationError("permission_denied");
+        }
+    }
+
+    private void deliverLocationResult(double lat, double lng, float accuracy) {
+        if (webView == null) return;
+        String script = "window.onLocationResult && window.onLocationResult(" + lat + "," + lng + "," + accuracy + ");";
+        webView.evaluateJavascript(script, null);
+    }
+
+    private void deliverLocationError(String reason) {
+        if (webView == null) return;
+        webView.evaluateJavascript("window.onLocationError && window.onLocationError(" + jsQuote(reason) + ");", null);
+    }
+
+    private PendingIntent geofencePendingIntent() {
+        Intent intent = new Intent(this, GeofenceBroadcastReceiver.class);
+        // Play Services writes the triggering geofence data into this
+        // Intent's extras at fire time, so it must be mutable (required
+        // explicitly since Android 12).
+        return PendingIntent.getBroadcast(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE);
+    }
+
+    void registerGeofence(String id, double lat, double lng, float radiusMeters) {
+        if (id == null || id.isEmpty()) return;
+        if (!hasLocationPermission()) {
+            pendingLocationAction = () -> registerGeofence(id, lat, lng, radiusMeters);
+            locationPermissionLauncher.launch(new String[]{
+                    Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION});
+            return;
+        }
+        Geofence geofence = new Geofence.Builder()
+                .setRequestId(id)
+                .setCircularRegion(lat, lng, Math.max(radiusMeters, 20f))
+                .setExpirationDuration(Geofence.NEVER_EXPIRE)
+                .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER | Geofence.GEOFENCE_TRANSITION_EXIT)
+                .build();
+        GeofencingRequest request = new GeofencingRequest.Builder()
+                .setInitialTrigger(GeofencingRequest.INITIAL_TRIGGER_ENTER)
+                .addGeofence(geofence)
+                .build();
+        try {
+            geofencingClient.addGeofences(request, geofencePendingIntent());
+        } catch (SecurityException ignored) {
+            deliverLocationError("permission_denied");
+        }
+    }
+
+    void unregisterGeofence(String id) {
+        if (id == null || id.isEmpty() || geofencingClient == null) return;
+        geofencingClient.removeGeofences(Collections.singletonList(id));
+    }
+
+    /** Called by GeofenceBroadcastReceiver when this Activity is the live foreground instance. */
+    void deliverGeofenceEvent(String id, boolean entered) {
+        runOnUiThread(() -> {
+            if (webView == null) return;
+            String script = "window.onGeofenceEvent && window.onGeofenceEvent(" + jsQuote(id) + "," + entered + ");";
+            webView.evaluateJavascript(script, null);
+        });
     }
 
     private class RetryBridge {
@@ -2335,4 +2682,4 @@ public class MainActivity extends AppCompatActivity {
         backPressedAt = System.currentTimeMillis();
         showSnackbar("Press back again to exit");
     }
-            }
+}

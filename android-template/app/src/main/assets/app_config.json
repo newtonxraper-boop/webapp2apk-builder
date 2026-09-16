@@ -6,6 +6,7 @@
   "filecamera_enabled": {{FILECAMERA_ENABLED}},
   "splash_enabled": {{SPLASH_ENABLED}},
   "crash_report_url": "{{CRASH_REPORT_URL}}",
-  "privacy_policy_url": "{{PRIVACY_POLICY_URL}}"
+  "privacy_policy_url": "{{PRIVACY_POLICY_URL}}",
+  "kiosk_enabled": {{KIOSK_ENABLED}}
 }
 

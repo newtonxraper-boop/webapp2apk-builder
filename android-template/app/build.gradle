@@ -69,7 +69,6 @@ android {
 dependencies {
     implementation 'androidx.core:core:1.12.0'
     implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
     implementation 'androidx.activity:activity:1.8.2'
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'com.google.firebase:firebase-messaging:23.4.1'
@@ -85,6 +84,13 @@ dependencies {
     // (back gesture returns straight to the app) instead of switching to a
     // separate browser app.
     implementation 'androidx.browser:browser:1.8.0'
+    // QR/barcode scanning bridge (window.AndroidScanQR) - a ready-made
+    // scanner Activity, no CameraX/ML Kit setup required.
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+    // One-shot location + geofencing bridge (window.AndroidLocation) - Play
+    // Services' Fused Location Provider is the standard, battery-friendly
+    // way to do both.
+    implementation 'com.google.android.gms:play-services-location:21.2.0'
 }
 
 configurations.all {
