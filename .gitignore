@@ -1,1 +1,5 @@
 android-template/app/release.keystore
+electron-template/node_modules/
+electron-template/dist/
+scripts/node_modules/
+

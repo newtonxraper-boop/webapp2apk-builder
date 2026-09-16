@@ -47,6 +47,10 @@ on:
         description: 'Base64-encoded JSON array of bottom nav tabs'
         required: false
         default: ''
+      kiosk_enabled:
+        description: "'true' or 'false' - pins the app fullscreen (screen pinning), for POS/kiosk deployments"
+        required: false
+        default: 'false'
       crash_report_url:
         description: 'Optional URL to POST crash reports to (leave blank to disable)'
         required: false
@@ -84,6 +88,7 @@ jobs:
           SPLASH_ENABLED: ${{ inputs.splash_enabled }}
           PUSH_ENABLED: ${{ inputs.push_enabled }}
           FILECAMERA_ENABLED: ${{ inputs.filecamera_enabled }}
+          KIOSK_ENABLED: ${{ inputs.kiosk_enabled }}
           NAV_ITEMS_B64: ${{ inputs.nav_items_b64 }}
           CRASH_REPORT_URL: ${{ inputs.crash_report_url }}
           PRIVACY_POLICY_URL: ${{ inputs.privacy_policy_url }}
