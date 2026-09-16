@@ -42,7 +42,7 @@ public class GeofenceBroadcastReceiver extends BroadcastReceiver {
         boolean exited = transition == Geofence.GEOFENCE_TRANSITION_EXIT;
         if (!entered && !exited) return;
 
-        List<Geofence> triggering = event.triggeringGeofences();
+        List<Geofence> triggering = event.getTriggeringGeofences();
         if (triggering == null) return;
 
         for (Geofence geofence : triggering) {
