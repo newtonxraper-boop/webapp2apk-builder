@@ -1,51 +1,50 @@
-name: Build Android APK
+name: Build APK
 
 on:
   workflow_dispatch:
     inputs:
       app_name:
-        description: 'Display name of the app'
-        required: true
-      app_url:
-        description: 'URL the app wraps'
-        required: true
-      package_name:
-        description: 'Android applicationId (e.g. com.example.app)'
+        description: 'App Name'
         required: false
-        default: ''
-      icon_url:
-        description: 'URL of the icon image to embed'
+        default: 'WebApp'
+      app_url:
+        description: 'App URL'
+        required: false
+        default: 'https://example.com'
+      package_name:
+        description: 'Package Name / applicationId (e.g. com.example.myapp). Leave blank to auto-generate from App Name.'
         required: false
         default: ''
       request_id:
-        description: 'Build request id (matches builds.request_id, used by receive.php)'
-        required: true
+        description: 'Internal request/build ID (optional)'
+        required: false
+        default: ''
+      icon_url:
+        description: 'Public URL to the uploaded app icon (PNG/JPG)'
+        required: false
+        default: ''
       primary_color:
-        description: 'Primary theme color (#RRGGBB)'
+        description: 'Primary hex color, e.g. #3DDC84'
         required: false
         default: '#3DDC84'
       accent_color:
-        description: 'Accent theme color (#RRGGBB)'
+        description: 'Accent hex color, e.g. #3DDC84'
         required: false
         default: '#3DDC84'
       splash_enabled:
-        description: 'Show splash screen'
+        description: "'true' or 'false'"
         required: false
         default: 'true'
       push_enabled:
-        description: 'Enable Firebase push notifications'
+        description: "'true' or 'false'"
         required: false
         default: 'false'
       filecamera_enabled:
-        description: 'Enable file upload / camera access bridge'
+        description: "'true' or 'false'"
         required: false
         default: 'true'
-      kiosk_enabled:
-        description: 'Enable kiosk mode'
-        required: false
-        default: 'false'
       nav_items_b64:
-        description: 'Base64-encoded JSON array of bottom nav items'
+        description: 'Base64-encoded JSON array of bottom nav tabs'
         required: false
         default: ''
       kiosk_enabled:
@@ -53,101 +52,27 @@ on:
         required: false
         default: 'false'
       crash_report_url:
-        description: 'Optional crash-report endpoint URL'
+        description: 'Optional URL to POST crash reports to (leave blank to disable)'
         required: false
         default: ''
       privacy_policy_url:
-        description: 'Optional privacy policy URL'
+        description: 'Optional URL to a privacy policy, shown once on first launch (leave blank to disable)'
         required: false
         default: ''
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: 'zulu'
           java-version: '17'
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Python dependencies
-        run: pip install Pillow
-
-      - name: Generate app resources
-        working-directory: github-repo/scripts
-        env:
-          APP_NAME: ${{ inputs.app_name }}
-          APP_URL: ${{ inputs.app_url }}
-          PACKAGE_NAME: ${{ inputs.package_name }}
-          ICON_URL: ${{ inputs.icon_url }}
-          REQUEST_ID: ${{ inputs.request_id }}
-          PRIMARY_COLOR: ${{ inputs.primary_color }}
-          ACCENT_COLOR: ${{ inputs.accent_color }}
-          SPLASH_ENABLED: ${{ inputs.splash_enabled }}
-          PUSH_ENABLED: ${{ inputs.push_enabled }}
-          FILECAMERA_ENABLED: ${{ inputs.filecamera_enabled }}
-          KIOSK_ENABLED: ${{ inputs.kiosk_enabled }}
-          NAV_ITEMS_B64: ${{ inputs.nav_items_b64 }}
-          CRASH_REPORT_URL: ${{ inputs.crash_report_url }}
-          PRIVACY_POLICY_URL: ${{ inputs.privacy_policy_url }}
-          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
-          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
-          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
-          FIREBASE_SENDER_ID: ${{ secrets.FIREBASE_SENDER_ID }}
-        run: python generate_resources.py
-
-      - name: Grant execute permission for gradlew
-        working-directory: github-repo/android-template
-        run: chmod +x gradlew
-
-      - name: Build release APK
-        working-directory: github-repo/android-template
-        env:
-          KEYSTORE_PATH: ${{ secrets.KEYSTORE_PATH }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew assembleRelease --no-daemon
-
-      - name: Locate built APK
-        id: find_apk
-        working-directory: github-repo/android-template
-        run: |
-          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
-          if [ -z "$APK_PATH" ]; then
-            echo "No APK found under app/build/outputs/apk/release" >&2
-            exit 1
-          fi
-          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
-
-      - name: Upload APK to site
-        working-directory: github-repo/android-template
-        env:
-          RECEIVE_URL: ${{ secrets.RECEIVE_URL }}
-          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
-        run: |
-          curl -sS -f \
-            -F "token=${CALLBACK_SECRET}" \
-            -F "request_id=${{ inputs.request_id }}" \
-            -F "apk=@${{ steps.find_apk.outputs.apk_path }}" \
-            "${RECEIVE_URL}"
-
-      - name: Upload APK as workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-${{ inputs.request_id }}
-          path: github-repo/android-template/${{ steps.find_apk.outputs.apk_path }}
-          retention-days: 7
       - name: Install Pillow for icon processing
         run: pip3 install --quiet --break-system-packages Pillow
 
