@@ -34,6 +34,12 @@
          fully killed the process - see GeofenceBroadcastReceiver.java. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Battery optimization exemption (Settings screen, manual opt-in only -
+         see SettingsActivity's "Reliable notifications & sync" row). Never
+         requested automatically on launch, since Play Store policy restricts
+         this permission to apps whose core function needs it and reviewers
+         are wary of it being requested unprompted. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <uses-feature
         android:name="android.hardware.camera"
@@ -56,6 +62,7 @@
         android:label="@string/app_name"
         android:usesCleartextTraffic="true"
         android:localeConfig="@xml/locales_config"
+        android:enableOnBackInvokedCallback="true"
         android:theme="@style/Theme.WebApp2Apk">
 
         <activity

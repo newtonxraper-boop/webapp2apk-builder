@@ -47,6 +47,7 @@ import android.webkit.WebViewClient;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
@@ -121,7 +122,6 @@ public class MainActivity extends AppCompatActivity {
 
     private String homeUrl;
     private boolean filecameraEnabled;
-    private boolean kioskEnabled;
 
     // NFC tap bridge state (see NfcBridge.java / nfc lifecycle methods below).
     private NfcAdapter nfcAdapter;
@@ -235,7 +235,6 @@ public class MainActivity extends AppCompatActivity {
         JSONObject config = App.appConfig;
         homeUrl = config.optString("app_url", getString(R.string.app_url));
         filecameraEnabled = config.optBoolean("filecamera_enabled", true);
-        kioskEnabled = config.optBoolean("kiosk_enabled", false);
 
         nfcAdapter = NfcAdapter.getDefaultAdapter(this);
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
@@ -257,6 +256,7 @@ public class MainActivity extends AppCompatActivity {
         prefs = getSharedPreferences("webapp2apk_prefs", MODE_PRIVATE);
 
         setupActivityResultLaunchers();
+        setupBackHandling();
         setupWebView();
         updateSyncBanner(getQueueSize());
         setupDownloadListener();
@@ -1360,14 +1360,32 @@ public class MainActivity extends AppCompatActivity {
     // QR / barcode scanner (window.AndroidScanQR - see QrScanBridge.java)
     // ---------------------------------------------------------------
 
+    /**
+     * A branded, friendly explainer shown right before Android's own
+     * permission dialog - people grant permissions far more often when they
+     * understand why first, rather than being ambushed by the bare system
+     * prompt. Shown every time the permission isn't granted yet (not just
+     * on a "denied once already" rationale), which is a deliberate,
+     * simpler choice than shouldShowRequestPermissionRationale()'s
+     * asymmetric first-time-vs-denied-once behavior.
+     */
+    private void showPermissionRationale(String title, String message, Runnable onProceed) {
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton("Continue", (dialog, which) -> onProceed.run())
+                .setNegativeButton("Not now", null)
+                .setCancelable(true)
+                .show();
+    }
+
     void launchQrScanner() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
                 != PackageManager.PERMISSION_GRANTED) {
-            // Same CAMERA permission the WebView's own file/camera capture
-            // inputs already use (declared once in the manifest) - this is
-            // just a separate runtime prompt for it, triggered the first
-            // time the page actually calls AndroidScanQR.scan().
-            requestPermissions(new String[]{Manifest.permission.CAMERA}, 9001);
+            showPermissionRationale(
+                    "Camera access",
+                    "This app uses your camera to scan the code.",
+                    () -> requestPermissions(new String[]{Manifest.permission.CAMERA}, 9001));
             return;
         }
         ScanOptions options = new ScanOptions();
@@ -1511,7 +1529,14 @@ public class MainActivity extends AppCompatActivity {
      * trying to remove.
      */
     private void maybeEnterKioskMode() {
-        if (!kioskEnabled) return;
+        if (!KioskModeManager.isEnabled(this)) {
+            try {
+                stopLockTask();
+            } catch (Exception ignored) {
+                // Wasn't pinned to begin with - nothing to undo.
+            }
+            return;
+        }
         try {
             startLockTask();
         } catch (Exception ignored) {
@@ -1540,8 +1565,11 @@ public class MainActivity extends AppCompatActivity {
     void requestCurrentLocation() {
         if (!hasLocationPermission()) {
             pendingLocationAction = this::requestCurrentLocation;
-            locationPermissionLauncher.launch(new String[]{
-                    Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION});
+            showPermissionRationale(
+                    "Location access",
+                    "This app uses your location to show you relevant content nearby.",
+                    () -> locationPermissionLauncher.launch(new String[]{
+                            Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}));
             return;
         }
         try {
@@ -1586,8 +1614,11 @@ public class MainActivity extends AppCompatActivity {
         if (id == null || id.isEmpty()) return;
         if (!hasLocationPermission()) {
             pendingLocationAction = () -> registerGeofence(id, lat, lng, radiusMeters);
-            locationPermissionLauncher.launch(new String[]{
-                    Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION});
+            showPermissionRationale(
+                    "Location access",
+                    "This app uses your location to notify you about nearby places.",
+                    () -> locationPermissionLauncher.launch(new String[]{
+                            Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}));
             return;
         }
         Geofence geofence = new Geofence.Builder()
@@ -2669,17 +2700,34 @@ public class MainActivity extends AppCompatActivity {
         return cachedNavItems;
     }
 
-    @Override
-    public void onBackPressed() {
-        if (webView.canGoBack()) {
-            webView.goBack();
-            return;
-        }
-        if (backPressedAt + 2000 > System.currentTimeMillis()) {
-            super.onBackPressed();
-            return;
-        }
-        backPressedAt = System.currentTimeMillis();
-        showSnackbar("Press back again to exit");
+    /**
+     * Registered via OnBackPressedDispatcher instead of overriding
+     * onBackPressed() directly - on Android 13+ (with the manifest's
+     * enableOnBackInvokedCallback flag) this is what lets the system show
+     * its real predictive-back swipe preview animation instead of the old
+     * abrupt "just close" behavior, while still working identically on
+     * older versions.
+     */
+    private void setupBackHandling() {
+        OnBackPressedCallback callback = new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (webView.canGoBack()) {
+                    webView.goBack();
+                    return;
+                }
+                if (backPressedAt + 2000 > System.currentTimeMillis()) {
+                    // Let this one fall through to the platform's actual
+                    // default back behavior (finish the Activity) instead
+                    // of re-triggering this same callback.
+                    setEnabled(false);
+                    getOnBackPressedDispatcher().onBackPressed();
+                    return;
+                }
+                backPressedAt = System.currentTimeMillis();
+                showSnackbar("Press back again to exit");
+            }
+        };
+        getOnBackPressedDispatcher().addCallback(this, callback);
     }
 }

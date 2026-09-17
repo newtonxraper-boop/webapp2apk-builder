@@ -1,8 +1,13 @@
 package com.webapp2apk.generated;
 
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.view.View;
 import android.widget.Switch;
 import android.widget.TextView;
@@ -39,9 +44,11 @@ public class SettingsActivity extends AppCompatActivity {
         toolbar.setNavigationOnClickListener(v -> finish());
 
         setupAppLockRow();
+        setupKioskModeRow();
         setupNotificationsRow();
         setupSyncRow();
         setupClearCacheRow();
+        setupBatteryOptimizationRow();
         setupLanguageRow();
         setupVersionText();
     }
@@ -52,6 +59,66 @@ public class SettingsActivity extends AppCompatActivity {
         // Reflect a queue that may have drained (or grown) while this screen
         // was in the background, without needing a manual refresh.
         refreshSyncStatus();
+        // Also reflect a battery-exemption grant made while the person was
+        // over in system Settings, in case they backed out to here after.
+        refreshBatteryOptimizationStatus();
+    }
+
+    private void setupKioskModeRow() {
+        Switch kioskSwitch = findViewById(R.id.kioskModeSwitch);
+        kioskSwitch.setChecked(KioskModeManager.isEnabled(this));
+
+        kioskSwitch.setOnCheckedChangeListener((button, checked) -> {
+            KioskModeManager.setEnabled(this, checked);
+            try {
+                if (checked) {
+                    startLockTask();
+                } else {
+                    stopLockTask();
+                }
+            } catch (Exception ignored) {
+                // Not pinned yet, or this OEM blocks it - the preference is
+                // still saved either way, and MainActivity re-applies it
+                // correctly on its own next resume regardless.
+            }
+        });
+    }
+
+    private void setupBatteryOptimizationRow() {
+        refreshBatteryOptimizationStatus();
+
+        TextView button = findViewById(R.id.batteryOptimizationButton);
+        button.setOnClickListener(v -> {
+            try {
+                Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                intent.setData(Uri.parse("package:" + getPackageName()));
+                startActivity(intent);
+            } catch (Exception e) {
+                // Some OEM skins (MIUI, ColorOS, etc.) don't implement this
+                // action - fall back to the general battery settings screen,
+                // where the person can usually find an equivalent option
+                // under a differently-named menu.
+                try {
+                    startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                } catch (Exception ignored) {
+                }
+            }
+        });
+    }
+
+    private void refreshBatteryOptimizationStatus() {
+        TextView subtext = findViewById(R.id.batteryOptimizationSubtext);
+        TextView button = findViewById(R.id.batteryOptimizationButton);
+        PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+        boolean exempted = Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+                || (powerManager != null && powerManager.isIgnoringBatteryOptimizations(getPackageName()));
+        if (exempted) {
+            subtext.setText("Enabled - this app can run reliably in the background");
+            button.setVisibility(View.GONE);
+        } else {
+            subtext.setText("Some phones aggressively stop background apps, which can delay notifications and offline sync");
+            button.setVisibility(View.VISIBLE);
+        }
     }
 
     private void setupAppLockRow() {

@@ -69,6 +69,49 @@
                 android:layout_height="1dp"
                 android:background="#E4E4E4" />
 
+            <!-- App pinning (kiosk mode) -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingTop="12dp"
+                android:paddingBottom="12dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="App pinning"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:textColor="#1A1A1A" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="Locks the screen to this app - for kiosks, POS terminals, or single-purpose devices"
+                        android:textSize="12.5sp"
+                        android:textColor="#6B6B6B" />
+                </LinearLayout>
+
+                <Switch
+                    android:id="@+id/kioskModeSwitch"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#E4E4E4" />
+
             <!-- Notifications -->
             <LinearLayout
                 android:layout_width="match_parent"
@@ -188,6 +231,54 @@
                     android:paddingBottom="10dp"
                     android:background="@drawable/sync_action_button_bg"
                     android:text="Clear offline cache"
+                    android:textColor="#04150A"
+                    android:textStyle="bold"
+                    android:textSize="13.5sp"
+                    android:clickable="true"
+                    android:focusable="true" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#E4E4E4" />
+
+            <!-- Battery optimization exemption -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingTop="16dp"
+                android:paddingBottom="8dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Reliable notifications &amp; sync"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:textColor="#1A1A1A" />
+
+                <TextView
+                    android:id="@+id/batteryOptimizationSubtext"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="Some phones aggressively stop background apps, which can delay notifications and offline sync"
+                    android:textSize="12.5sp"
+                    android:textColor="#6B6B6B" />
+
+                <TextView
+                    android:id="@+id/batteryOptimizationButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:paddingStart="20dp"
+                    android:paddingEnd="20dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="10dp"
+                    android:background="@drawable/sync_action_button_bg"
+                    android:text="Improve reliability"
                     android:textColor="#04150A"
                     android:textStyle="bold"
                     android:textSize="13.5sp"
