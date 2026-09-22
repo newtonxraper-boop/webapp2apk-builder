@@ -6,8 +6,12 @@
   "main": "src/main.js",
   "private": true,
   "scripts": {
+    "test": "node --test",
     "build:win": "electron-builder --win nsis --publish=never",
     "build:mac": "electron-builder --mac dmg zip --publish=never"
+  },
+  "dependencies": {
+    "jsqr": "^1.4.0"
   },
   "devDependencies": {
     "electron": "^31.0.0",
@@ -22,7 +26,8 @@
     },
     "files": [
       "src/**/*",
-      "package.json"
+      "package.json",
+      "node_modules/jsqr/dist/jsQR.js"
     ],
     "icon": "build/icon.png",
     "win": {
@@ -43,7 +48,13 @@
       ],
       "category": "public.app-category.utilities",
       "hardenedRuntime": false,
-      "identity": null
+      "identity": null,
+      "extendInfo": {
+        "NSCameraUsageDescription": "This app uses your camera to scan codes and take photos.",
+        "NSMicrophoneUsageDescription": "This app uses your microphone when a page asks to record audio.",
+        "NSLocationUsageDescription": "This app uses your location to show you relevant content nearby.",
+        "NSLocationWhenInUseUsageDescription": "This app uses your location to show you relevant content nearby."
+      }
     }
   }
 }

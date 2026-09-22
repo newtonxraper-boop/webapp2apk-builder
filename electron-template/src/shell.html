@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>App</title>
+<style>
+  :root { --primary: #3DDC84; --accent: #3DDC84; --bg: #0f1115; --panel: #171a21; --line: #262b33; --text: #e8eaed; --muted: #9aa0a6; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+    font-family: 'Segoe UI', -apple-system, Roboto, Arial, sans-serif; }
+  button { font-family: inherit; }
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  /* ---- top banners (offline / update / pending sync) ---- */
+  .banner { display: none; align-items: center; justify-content: center; gap: 12px; padding: 7px 14px; font-size: 12.5px; flex: 0 0 auto; }
+  .banner.show { display: flex; }
+  #offlineBanner { background: #b45309; color: #fff; cursor: pointer; }
+  #updateBanner { background: var(--accent); color: #04150a; cursor: pointer; font-weight: 600; }
+  #syncBanner { background: #1e3a5f; color: #fff; }
+  #syncBanner button { border: 1px solid rgba(255,255,255,.5); background: transparent; color: #fff; border-radius: 999px; padding: 3px 12px; font-size: 12px; cursor: pointer; }
+  #syncBanner button:hover { background: rgba(255,255,255,.12); }
+
+  #content-wrap { flex: 1; position: relative; min-height: 0; }
+  #webviewHost, #webviewHost webview { width: 100%; height: 100%; }
+  #webviewHost webview { display: flex; }
+
+  /* ---- floating share / refresh / settings buttons ---- */
+  #fab { position: absolute; right: 14px; bottom: 14px; display: flex; flex-direction: column; gap: 8px; z-index: 30; }
+  #fab button { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--line); background: rgba(23,26,33,.86);
+    color: var(--text); font-size: 17px; cursor: pointer; backdrop-filter: blur(6px); box-shadow: 0 4px 12px rgba(0,0,0,.35); }
+  #fab button:hover { background: var(--accent); color: #04150a; }
+
+  /* ---- splash ---- */
+  #splash { position: fixed; inset: 0; background: var(--primary); color: #fff; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; z-index: 50; transition: opacity .35s ease; }
+  #splash.hide { opacity: 0; pointer-events: none; }
+  #splash img { width: 96px; height: 96px; border-radius: 22px; margin-bottom: 18px; }
+  #splash .spinner { width: 28px; height: 28px; border: 3px solid rgba(255,255,255,.35); border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---- toast ---- */
+  #toast { position: fixed; left: 50%; bottom: 70px; transform: translate(-50%, 20px); background: #2a2f3a; color: var(--text); padding: 10px 16px;
+    border-radius: 8px; font-size: 13px; opacity: 0; pointer-events: none; transition: all .25s ease; z-index: 70; max-width: 80%; text-align: center; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  /* ---- privacy banner ---- */
+  #privacy-banner { position: absolute; left: 0; right: 0; bottom: 0; z-index: 40; background: var(--panel); font-size: 12px; padding: 10px 14px;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); transform: translateY(100%); transition: transform .3s ease; }
+  #privacy-banner.show { transform: translateY(0); }
+  #privacy-banner a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  #privacy-banner button { border: none; background: #2a2f3a; color: var(--text); padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+
+  /* ---- bottom tab bar ---- */
+  #tabbar { display: none; background: var(--panel); border-top: 1px solid var(--line); flex: 0 0 auto; }
+  #tabbar button { flex: 1; border: none; background: transparent; color: var(--muted); padding: 8px 4px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; cursor: pointer; }
+  #tabbar button:hover { background: rgba(255,255,255,.04); }
+  #tabbar .ic { font-size: 18px; line-height: 1; }
+  #tabbar .lb { font-size: 10.5px; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #tabbar button.active { color: var(--accent); }
+
+  /* ---- modal overlays: settings / lock / qr ---- */
+  .overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.6); z-index: 60; }
+  .overlay.show { display: flex; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; width: min(520px, 92vw); max-height: 88vh; overflow: auto; padding: 18px 20px; }
+  .card h2 { margin: 0 0 12px; font-size: 18px; display: flex; justify-content: space-between; align-items: center; }
+  .card h2 button { background: transparent; border: none; color: var(--muted); font-size: 20px; cursor: pointer; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 0; border-top: 1px solid var(--line); }
+  .row:first-of-type { border-top: none; }
+  .row .t { font-weight: 600; font-size: 14.5px; }
+  .row .s { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .btn { border: none; border-radius: 999px; background: var(--accent); color: #04150a; font-weight: 700; font-size: 13px; padding: 8px 16px; cursor: pointer; white-space: nowrap; }
+  .btn.secondary { background: #2a2f3a; color: var(--text); }
+  .btn[disabled] { opacity: .5; cursor: default; }
+  .switch { position: relative; width: 42px; height: 24px; flex: 0 0 auto; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; background: #3a3f4a; border-radius: 24px; cursor: pointer; transition: .2s; }
+  .slider:before { content: ''; position: absolute; height: 18px; width: 18px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .2s; }
+  .switch input:checked + .slider { background: var(--accent); }
+  .switch input:checked + .slider:before { transform: translateX(18px); }
+  .switch input:disabled + .slider { opacity: .5; cursor: default; }
+  .inline-form { display: none; padding: 0 0 12px; }
+  .inline-form.show { display: block; }
+  input.text { width: 100%; padding: 10px 12px; margin: 6px 0; border-radius: 8px; border: 1px solid var(--line); background: #0f1115; color: var(--text); font-size: 14px; }
+  .err { color: #ff8a80; font-size: 12.5px; min-height: 16px; }
+  .link { color: var(--accent); cursor: pointer; text-decoration: none; }
+
+  #lockOverlay { background: var(--bg); z-index: 90; }
+  #lockOverlay .card { text-align: center; width: min(360px, 90vw); }
+  #lockOverlay img { width: 64px; height: 64px; border-radius: 16px; margin-bottom: 8px; }
+  #qrOverlay video { width: 100%; border-radius: 10px; background: #000; max-height: 60vh; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="offlineBanner" class="banner">No internet connection &middot; click to retry</div>
+  <div id="updateBanner" class="banner">A new version is available - click to download</div>
+  <div id="syncBanner" class="banner"><span id="syncText"></span><button type="button" id="syncNowBtn">Send now</button></div>
+
+  <div id="content-wrap">
+    <div id="webviewHost"></div>
+    <div id="fab">
+      <button type="button" id="shareBtn" title="Share this page">&#8599;</button>
+      <button type="button" id="refreshBtn" title="Refresh">&#8635;</button>
+      <button type="button" id="settingsBtn" title="Settings">&#9881;</button>
+    </div>
+    <div id="privacy-banner">
+      <span>See our <a href="#" id="privacyLink">privacy policy</a>.</span>
+      <button type="button" id="privacyDismiss">Got it</button>
+    </div>
+  </div>
+
+  <div id="tabbar"></div>
+  <div id="splash"><img src="icon.png" alt="" onerror="this.style.display='none'"><div class="spinner"></div></div>
+  <div id="toast"></div>
+
+  <!-- Settings -->
+  <div id="settingsOverlay" class="overlay">
+    <div class="card">
+      <h2><span>Settings</span><button type="button" id="settingsClose" title="Close">&times;</button></h2>
+
+      <div class="row">
+        <div><div class="t">App lock</div><div class="s" id="lockSub">Require a PIN to open this app</div></div>
+        <label class="switch"><input type="checkbox" id="lockSwitch"><span class="slider"></span></label>
+      </div>
+      <div class="inline-form" id="pinSetForm">
+        <input class="text" type="password" id="pinNew" placeholder="Choose a PIN (4-32 characters)" autocomplete="off">
+        <input class="text" type="password" id="pinConfirm" placeholder="Repeat PIN" autocomplete="off">
+        <div class="err" id="pinSetErr"></div>
+        <button class="btn" type="button" id="pinSetSave">Turn on app lock</button>
+        <div class="s" style="margin-top:8px">If you forget the PIN, reinstall the app to reset it.</div>
+      </div>
+      <div class="inline-form" id="pinOffForm">
+        <input class="text" type="password" id="pinCurrent" placeholder="Enter your PIN to turn off" autocomplete="off">
+        <div class="err" id="pinOffErr"></div>
+        <button class="btn" type="button" id="pinOffSave">Turn off app lock</button>
+      </div>
+
+      <div class="row">
+        <div><div class="t">Kiosk mode</div><div class="s">Runs the app fullscreen - for POS terminals or single-purpose machines. Use Ctrl/Cmd + , to open Settings again.</div></div>
+        <label class="switch"><input type="checkbox" id="kioskSwitch"><span class="slider"></span></label>
+      </div>
+
+      <div class="row">
+        <div><div class="t">Notifications</div><div class="s" id="notifSub">Allow this app to show desktop notifications</div></div>
+        <label class="switch"><input type="checkbox" id="notifSwitch"><span class="slider"></span></label>
+      </div>
+
+      <div class="row">
+        <div><div class="t">Offline sync</div><div class="s" id="syncStatus">Up to date</div></div>
+        <button class="btn" type="button" id="settingsSyncNow">Sync now</button>
+      </div>
+
+      <div class="row">
+        <div><div class="t">Storage</div><div class="s" id="cacheStatus">Offline cache: 0 KB</div></div>
+        <button class="btn secondary" type="button" id="clearCacheBtn">Clear offline cache</button>
+      </div>
+
+      <div class="row" id="updateRow" style="display:none">
+        <div><div class="t">Update available</div><div class="s">A newer version of this app can be downloaded.</div></div>
+        <button class="btn" type="button" id="updateBtn">Download</button>
+      </div>
+
+      <div class="row">
+        <div><div class="t">About</div><div class="s" id="versionText"></div></div>
+        <a class="link" id="privacyRow" style="display:none">Privacy policy</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- App lock screen -->
+  <div id="lockOverlay" class="overlay">
+    <div class="card">
+      <img id="lockIcon" src="icon.png" alt="" onerror="this.style.display='none'">
+      <h2 style="justify-content:center"><span id="lockTitle">Locked</span></h2>
+      <input class="text" type="password" id="lockPin" placeholder="Enter PIN" autocomplete="off">
+      <div class="err" id="lockErr"></div>
+      <div style="display:flex; gap:8px; justify-content:center; margin-top:6px">
+        <button class="btn" type="button" id="lockUnlock">Unlock</button>
+        <button class="btn secondary" type="button" id="lockTouch" style="display:none">Use Touch ID</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- QR / barcode scanner -->
+  <div id="qrOverlay" class="overlay">
+    <div class="card">
+      <h2><span>Scan a code</span></h2>
+      <video id="qrVideo" playsinline muted></video>
+      <canvas id="qrCanvas" style="display:none"></canvas>
+      <div class="s" id="qrStatus" style="margin:8px 0">Point the camera at a QR code.</div>
+      <button class="btn secondary" type="button" id="qrCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="../node_modules/jsqr/dist/jsQR.js" onerror="window.__noJsQR = true"></script>
+<script>
+(function () {
+  const api = window.shellApi;
+  const $ = (id) => document.getElementById(id);
+  let cfg = null, platform = '', webview = null, activeUrl = '', current = { online: true, queueSize: 0, locked: false, updateUrl: null };
+  let toastTimer = null;
+
+  // ---------------------------------------------------------- helpers
+  function toast(msg) {
+    const el = $('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 3500);
+  }
+  function fmtBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return Math.round(n / 1024) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MB';
+  }
+  function navigate(url) {
+    if (!webview) return;
+    try {
+      const p = webview.loadURL(url);
+      if (p && p.catch) p.catch(() => {});
+    } catch (e) { webview.src = url; }
+  }
+
+  // ---------------------------------------------------------- state -> UI
+  function applyState(s) {
+    current = Object.assign(current, s);
+    $('offlineBanner').classList.toggle('show', !s.online);
+    $('updateBanner').classList.toggle('show', !!s.updateUrl);
+    const q = s.queueSize || 0;
+    $('syncBanner').classList.toggle('show', q > 0);
+    $('syncText').textContent = q === 1 ? '1 item waiting to sync' : q + ' items waiting to sync';
+    if (s.locked) showLock(); else $('lockOverlay').classList.remove('show');
+    if ($('settingsOverlay').classList.contains('show')) refreshSettings();
+  }
+
+  // ---------------------------------------------------------- splash / privacy
+  function hideSplash() { $('splash').classList.add('hide'); }
+
+  function setupPrivacy() {
+    const url = cfg.privacy_policy_url;
+    if (!url) return;
+    let seen = false;
+    try { seen = localStorage.getItem('w2a_privacy_seen') === '1'; } catch (e) {}
+    if (!seen) $('privacy-banner').classList.add('show');
+    $('privacyLink').addEventListener('click', (e) => { e.preventDefault(); api.invoke('open-privacy'); });
+    $('privacyDismiss').addEventListener('click', () => {
+      $('privacy-banner').classList.remove('show');
+      try { localStorage.setItem('w2a_privacy_seen', '1'); } catch (e) {}
+    });
+    $('privacyRow').style.display = '';
+    $('privacyRow').addEventListener('click', () => api.invoke('open-privacy'));
+  }
+
+  // ---------------------------------------------------------- tabs
+  function itemMatches(item, url) {
+    try {
+      const a = new URL(item.url), b = new URL(url);
+      if (a.host !== b.host) return false;
+      const ap = a.pathname.replace(/\/+$/, ''), bp = b.pathname.replace(/\/+$/, '');
+      return ap === bp || (ap !== '' && bp.startsWith(ap + '/'));
+    } catch (e) { return false; }
+  }
+  function renderTabs() {
+    const bar = $('tabbar');
+    bar.innerHTML = '';
+    let best = null;
+    cfg.nav_items.forEach((it) => {
+      if (itemMatches(it, activeUrl) && (!best || new URL(it.url).pathname.length > new URL(best.url).pathname.length)) best = it;
+    });
+    cfg.nav_items.forEach((item) => {
+      const icon = (item.icon || '').trim();
+      const hasIcon = icon && icon !== '\u25CF';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = item === best ? 'active' : '';
+      btn.title = item.label;
+      const ic = document.createElement('span'); ic.className = 'ic';
+      ic.textContent = hasIcon ? icon : (item.label ? item.label.charAt(0).toUpperCase() : '?');
+      const lb = document.createElement('span'); lb.className = 'lb'; lb.textContent = item.label;
+      btn.appendChild(ic); btn.appendChild(lb);
+      btn.addEventListener('click', () => { activeUrl = item.url; navigate(item.url); renderTabs(); });
+      bar.appendChild(btn);
+    });
+  }
+
+  // ---------------------------------------------------------- settings
+  async function refreshSettings() {
+    const s = await api.invoke('get-settings');
+    if (!s) return;
+    $('lockSwitch').checked = !!s.appLock;
+    $('lockSwitch').disabled = false;
+    $('kioskSwitch').checked = !!s.kiosk;
+    $('notifSwitch').checked = !!s.notifications;
+    $('notifSub').textContent = s.pushBuild
+      ? 'Allow this app and its website to show desktop notifications'
+      : 'Reminders and download alerts from this app';
+    const q = s.queueSize || 0;
+    $('syncStatus').textContent = q === 0 ? 'Up to date'
+      : (q === 1 ? '1 change waiting to sync' : q + ' changes waiting to sync') + (s.lastSyncError ? ' \u00b7 ' + s.lastSyncError : '');
+    $('cacheStatus').textContent = 'Offline cache: ' + fmtBytes(s.cacheBytes || 0);
+    $('updateRow').style.display = s.updateUrl ? '' : 'none';
+    $('versionText').textContent = 'Version ' + s.version + (s.versionCode ? ' (' + s.versionCode + ')' : '');
+  }
+  function openSettings() { $('settingsOverlay').classList.add('show'); refreshSettings(); }
+  function closeSettings() {
+    $('settingsOverlay').classList.remove('show');
+    ['pinSetForm', 'pinOffForm'].forEach((id) => $(id).classList.remove('show'));
+    ['pinNew', 'pinConfirm', 'pinCurrent'].forEach((id) => { $(id).value = ''; });
+    ['pinSetErr', 'pinOffErr'].forEach((id) => { $(id).textContent = ''; });
+  }
+
+  function setupSettings() {
+    $('settingsBtn').addEventListener('click', openSettings);
+    $('settingsClose').addEventListener('click', closeSettings);
+    $('settingsOverlay').addEventListener('click', (e) => { if (e.target === $('settingsOverlay')) closeSettings(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        if ($('qrOverlay').classList.contains('show')) stopQr({ error: 'cancelled' });
+        else closeSettings();
+      }
+    });
+
+    $('lockSwitch').addEventListener('change', async () => {
+      const sw = $('lockSwitch');
+      const want = sw.checked;
+      // revert until the PIN step actually succeeds
+      sw.checked = !want;
+      $('pinSetForm').classList.toggle('show', want);
+      $('pinOffForm').classList.toggle('show', !want);
+      (want ? $('pinNew') : $('pinCurrent')).focus();
+    });
+    $('pinSetSave').addEventListener('click', async () => {
+      const a = $('pinNew').value, b = $('pinConfirm').value;
+      if (a.length < 4 || a.length > 32) { $('pinSetErr').textContent = 'Use 4 to 32 characters.'; return; }
+      if (a !== b) { $('pinSetErr').textContent = "The two PINs don't match."; return; }
+      const ok = await api.invoke('lock-set-pin', a);
+      if (!ok) { $('pinSetErr').textContent = 'Could not set the PIN.'; return; }
+      $('pinSetForm').classList.remove('show'); $('pinNew').value = ''; $('pinConfirm').value = ''; $('pinSetErr').textContent = '';
+      toast('App lock is on');
+      refreshSettings();
+    });
+    $('pinOffSave').addEventListener('click', async () => {
+      const ok = await api.invoke('lock-disable', $('pinCurrent').value);
+      if (!ok) { $('pinOffErr').textContent = 'That PIN is not correct (or too many tries - wait a moment).'; return; }
+      $('pinOffForm').classList.remove('show'); $('pinCurrent').value = ''; $('pinOffErr').textContent = '';
+      toast('App lock is off');
+      refreshSettings();
+    });
+
+    $('kioskSwitch').addEventListener('change', () => api.invoke('set-kiosk', $('kioskSwitch').checked));
+    $('notifSwitch').addEventListener('change', () => api.invoke('set-notifications', $('notifSwitch').checked));
+    $('settingsSyncNow').addEventListener('click', () => api.invoke('sync-now'));
+    $('clearCacheBtn').addEventListener('click', async () => { await api.invoke('clear-cache'); refreshSettings(); });
+    $('updateBtn').addEventListener('click', () => api.invoke('open-update'));
+  }
+
+  // ---------------------------------------------------------- lock screen
+  async function showLock() {
+    const el = $('lockOverlay');
+    if (el.classList.contains('show')) return;
+    $('lockTitle').textContent = cfg ? cfg.app_name : 'Locked';
+    $('lockPin').value = ''; $('lockErr').textContent = '';
+    el.classList.add('show');
+    $('settingsOverlay').classList.remove('show');
+    setTimeout(() => $('lockPin').focus(), 50);
+    const s = await api.invoke('get-settings');
+    $('lockTouch').style.display = s && s.canTouchId ? '' : 'none';
+    if (s && s.canTouchId) tryTouchId();
+  }
+  async function tryTouchId() { await api.invoke('lock-touchid'); }
+  async function tryUnlock() {
+    const r = await api.invoke('lock-verify', $('lockPin').value);
+    if (r && r.ok) { $('lockPin').value = ''; $('lockErr').textContent = ''; return; }
+    $('lockPin').value = '';
+    $('lockErr').textContent = r && r.retryInMs
+      ? 'Too many attempts. Try again in ' + Math.ceil(r.retryInMs / 1000) + 's.'
+      : 'Incorrect PIN.';
+  }
+  function setupLock() {
+    $('lockUnlock').addEventListener('click', tryUnlock);
+    $('lockTouch').addEventListener('click', tryTouchId);
+    $('lockPin').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryUnlock(); });
+  }
+
+  // ---------------------------------------------------------- QR / barcode scanner
+  let qrStream = null, qrTimer = null, qrDone = false;
+  async function startQr() {
+    const overlay = $('qrOverlay');
+    const video = $('qrVideo');
+    qrDone = false;
+    $('qrStatus').textContent = 'Point the camera at a code.';
+    try {
+      qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    } catch (e) {
+      api.invoke('qr-result', { error: e && e.name === 'NotAllowedError' ? 'permission_denied' : 'failed' });
+      toast('Could not open the camera');
+      return;
+    }
+    video.srcObject = qrStream;
+    try { await video.play(); } catch (e) {}
+    overlay.classList.add('show');
+
+    let detector = null;
+    try {
+      if ('BarcodeDetector' in window) {
+        const want = ['qr_code', 'ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e', 'itf', 'codabar'];
+        const have = await BarcodeDetector.getSupportedFormats();
+        const formats = want.filter((f) => have.includes(f));
+        if (formats.length) detector = new BarcodeDetector({ formats });
+      }
+    } catch (e) { detector = null; }
+
+    const canvas = $('qrCanvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const tick = async () => {
+      if (qrDone) return;
+      try {
+        if (video.readyState >= 2) {
+          let text = null;
+          if (detector) {
+            const found = await detector.detect(video);
+            if (found && found.length) text = found[0].rawValue;
+          } else if (typeof window.jsQR === 'function') {
+            const scale = Math.min(1, 640 / (video.videoWidth || 640));
+            canvas.width = Math.max(1, Math.round((video.videoWidth || 640) * scale));
+            canvas.height = Math.max(1, Math.round((video.videoHeight || 480) * scale));
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+            if (code && code.data) text = code.data;
+          } else {
+            $('qrStatus').textContent = 'Code scanning is not available on this computer.';
+          }
+          if (text) { stopQr({ text }); return; }
+        }
+      } catch (e) { /* keep scanning */ }
+      qrTimer = setTimeout(tick, 150);
+    };
+    tick();
+  }
+  function stopQr(result) {
+    qrDone = true;
+    clearTimeout(qrTimer);
+    if (qrStream) { qrStream.getTracks().forEach((t) => t.stop()); qrStream = null; }
+    $('qrVideo').srcObject = null;
+    $('qrOverlay').classList.remove('show');
+    if (result) api.invoke('qr-result', result);
+  }
+
+  // ---------------------------------------------------------- boot
+  async function boot() {
+    const b = await api.invoke('boot');
+    cfg = b.config; platform = b.platform;
+    document.title = cfg.app_name;
+    document.documentElement.style.setProperty('--primary', cfg.primary_color);
+    document.documentElement.style.setProperty('--accent', cfg.accent_color);
+    if (!cfg.splash_enabled) hideSplash();
+    setTimeout(hideSplash, 6000); // hard timeout: a slow site can never trap the user behind the splash
+
+    const params = new URLSearchParams(location.search);
+    let start = params.get('start') || cfg.app_url;
+    activeUrl = start;
+
+    webview = document.createElement('webview');
+    webview.setAttribute('partition', b.partition);
+    webview.setAttribute('allowpopups', '');
+    webview.setAttribute('webpreferences', 'contextIsolation=yes,nodeIntegration=no');
+    webview.setAttribute('src', start);
+    $('webviewHost').appendChild(webview);
+    webview.addEventListener('did-stop-loading', hideSplash);
+    webview.addEventListener('did-fail-load', hideSplash);
+    const track = (e) => {
+      if (e.url && /^https?:/i.test(e.url) && (e.isMainFrame === undefined || e.isMainFrame)) {
+        activeUrl = e.url;
+        if (cfg.nav_items.length) renderTabs();
+      }
+    };
+    webview.addEventListener('did-navigate', track);
+    webview.addEventListener('did-navigate-in-page', track);
+
+    if (cfg.nav_items.length) { $('tabbar').style.display = 'flex'; renderTabs(); }
+
+    $('offlineBanner').addEventListener('click', () => api.invoke('retry'));
+    $('updateBanner').addEventListener('click', () => api.invoke('open-update'));
+    $('syncNowBtn').addEventListener('click', () => api.invoke('sync-now'));
+    $('shareBtn').addEventListener('click', () => api.invoke('share-current'));
+    $('refreshBtn').addEventListener('click', () => api.invoke('reload'));
+
+    setupPrivacy();
+    setupSettings();
+    setupLock();
+    $('qrCancel').addEventListener('click', () => stopQr({ error: 'cancelled' }));
+
+    api.on('shell:state', applyState);
+    api.on('shell:toast', toast);
+    api.on('shell:open-settings', openSettings);
+    api.on('shell:qr-open', startQr);
+
+    applyState(b.state);
+  }
+  boot();
+})();
+</script>
+</body>
+</html>

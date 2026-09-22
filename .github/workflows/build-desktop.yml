@@ -31,6 +31,38 @@ on:
         description: 'Primary hex color, e.g. #3DDC84'
         required: false
         default: '#3DDC84'
+      accent_color:
+        description: 'Accent hex color, e.g. #3DDC84'
+        required: false
+        default: '#3DDC84'
+      splash_enabled:
+        description: "'true' or 'false' - show a branded splash screen on launch"
+        required: false
+        default: 'true'
+      push_enabled:
+        description: "'true' or 'false' - allow the site to show desktop notifications"
+        required: false
+        default: 'false'
+      filecamera_enabled:
+        description: "'true' or 'false' - allow camera/mic permission prompts from the site"
+        required: false
+        default: 'true'
+      kiosk_enabled:
+        description: "'true' or 'false' - start fullscreen in kiosk mode (can be switched off later in Settings)"
+        required: false
+        default: 'false'
+      nav_items_b64:
+        description: 'Base64-encoded JSON array of {icon,label,url} bottom-nav tabs (up to 5)'
+        required: false
+        default: ''
+      crash_report_url:
+        description: 'Optional URL the app POSTs a small JSON crash report to'
+        required: false
+        default: ''
+      privacy_policy_url:
+        description: 'Optional privacy policy URL, shown once on first launch'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -58,6 +90,14 @@ jobs:
           PACKAGE_NAME: ${{ inputs.package_name }}
           ICON_URL: ${{ inputs.icon_url }}
           PRIMARY_COLOR: ${{ inputs.primary_color }}
+          ACCENT_COLOR: ${{ inputs.accent_color }}
+          SPLASH_ENABLED: ${{ inputs.splash_enabled }}
+          PUSH_ENABLED: ${{ inputs.push_enabled }}
+          FILECAMERA_ENABLED: ${{ inputs.filecamera_enabled }}
+          KIOSK_ENABLED: ${{ inputs.kiosk_enabled }}
+          NAV_ITEMS_B64: ${{ inputs.nav_items_b64 }}
+          CRASH_REPORT_URL: ${{ inputs.crash_report_url }}
+          PRIVACY_POLICY_URL: ${{ inputs.privacy_policy_url }}
         run: node scripts/generate_desktop_resources.js
 
       - name: Show generated config files (debug)
@@ -65,11 +105,16 @@ jobs:
         run: |
           echo "----- electron-template/package.json -----"
           cat electron-template/package.json
-          echo "----- electron-template/src/main.js (first 20 lines) -----"
-          head -n 20 electron-template/src/main.js
+          echo "----- electron-template/src/app_config.json -----"
+          cat electron-template/src/app_config.json
 
       - name: Install dependencies
         run: npm install
+        working-directory: electron-template
+
+      - name: Run offline-logic self-tests (non-blocking)
+        continue-on-error: true
+        run: node --test
         working-directory: electron-template
 
       - name: Build Windows installer (.exe)

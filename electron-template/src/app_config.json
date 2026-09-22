@@ -1,0 +1,15 @@
+{
+  "app_name": "WebApp",
+  "app_url": "https://example.com",
+  "package_name": "com.webapp2apk.webapp",
+  "primary_color": "#3DDC84",
+  "accent_color": "#3DDC84",
+  "splash_enabled": true,
+  "push_enabled": false,
+  "filecamera_enabled": true,
+  "kiosk_enabled": false,
+  "crash_report_url": "",
+  "privacy_policy_url": "",
+  "nav_items": [],
+  "version_code": 0
+}

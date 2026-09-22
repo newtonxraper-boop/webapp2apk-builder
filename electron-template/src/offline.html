@@ -2,29 +2,45 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Offline</title>
 <style>
-  html, body {
-    margin: 0; height: 100%;
-    display: flex; align-items: center; justify-content: center;
-    background: #0f1115; color: #e8eaed;
-    font-family: 'Segoe UI', Roboto, Arial, sans-serif;
-  }
-  .box { text-align: center; padding: 32px; }
-  .box h1 { font-size: 18px; margin: 0 0 8px; }
-  .box p { color: #9aa0a6; font-size: 13px; margin: 0 0 20px; }
-  button {
-    padding: 10px 20px; border: none; border-radius: 8px;
-    background: #3ddc84; color: #04150a; font-weight: 700;
-    font-size: 13px; cursor: pointer;
-  }
+  :root { --primary: #3DDC84; --accent: #3DDC84; }
+  html, body { margin: 0; height: 100%; }
+  body { display: flex; align-items: center; justify-content: center; flex-direction: column; text-align: center; padding: 24px;
+    background: #171a21; color: #e8eaed; font-family: 'Segoe UI', -apple-system, Roboto, Arial, sans-serif; }
+  svg { width: 96px; height: 96px; }
+  h2 { margin: 16px 0 8px; color: var(--accent); }
+  p { color: #9aa0a6; font-size: 14px; margin: 0; }
+  button { margin-top: 20px; padding: 10px 22px; border-radius: 999px; border: none; background: var(--primary); color: #04150a;
+    font-weight: 700; font-size: 13px; cursor: pointer; box-shadow: 0 6px 16px rgba(0,0,0,.35), 0 2px 4px rgba(0,0,0,.25); }
+  button:active { box-shadow: 0 2px 6px rgba(0,0,0,.3); transform: translateY(1px); }
 </style>
 </head>
 <body>
-  <div class="box">
-    <h1>Can't reach the app right now</h1>
-    <p>Check your internet connection and try again.</p>
-    <button onclick="location.href='{{APP_URL}}'">Retry</button>
-  </div>
+  <svg viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="48" cy="48" r="44" style="fill: var(--primary)" opacity="0.15"/>
+    <path d="M24 40 Q48 16 72 40" style="stroke: var(--accent)" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.35"/>
+    <path d="M32 50 Q48 34 64 50" style="stroke: var(--accent)" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.6"/>
+    <path d="M40 60 Q48 52 56 60" style="stroke: var(--accent)" stroke-width="4" fill="none" stroke-linecap="round"/>
+    <circle cx="48" cy="70" r="4" style="fill: var(--accent)"/>
+    <line x1="20" y1="24" x2="76" y2="72" stroke="#e8eaed" stroke-width="4" stroke-linecap="round"/>
+  </svg>
+  <h2>You're offline</h2>
+  <p>This page hasn't been saved for offline use yet. It will open once you're back online.</p>
+  <button id="retry" type="button">Try again</button>
+<script>
+  // Colours arrive on the query string (main.js) so no build-time templating is needed here.
+  (function () {
+    var q = new URLSearchParams(location.search);
+    var hex = /^#[0-9A-Fa-f]{6}$/;
+    if (hex.test(q.get('primary') || '')) document.documentElement.style.setProperty('--primary', q.get('primary'));
+    if (hex.test(q.get('accent') || '')) document.documentElement.style.setProperty('--accent', q.get('accent'));
+    document.getElementById('retry').addEventListener('click', function () {
+      if (window.AndroidRetry && window.AndroidRetry.retry) window.AndroidRetry.retry();
+      else location.reload();
+    });
+  })();
+</script>
 </body>
 </html>
