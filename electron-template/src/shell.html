@@ -43,12 +43,6 @@
     border-radius: 8px; font-size: 13px; opacity: 0; pointer-events: none; transition: all .25s ease; z-index: 70; max-width: 80%; text-align: center; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
   #toast.show { opacity: 1; transform: translate(-50%, 0); }
 
-  /* ---- privacy banner ---- */
-  #privacy-banner { position: absolute; left: 0; right: 0; bottom: 0; z-index: 40; background: var(--panel); font-size: 12px; padding: 10px 14px;
-    display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); transform: translateY(100%); transition: transform .3s ease; }
-  #privacy-banner.show { transform: translateY(0); }
-  #privacy-banner a { color: var(--accent); text-decoration: none; font-weight: 600; }
-  #privacy-banner button { border: none; background: #2a2f3a; color: var(--text); padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 
   /* ---- bottom tab bar ---- */
   #tabbar { display: none; background: var(--panel); border-top: 1px solid var(--line); flex: 0 0 auto; }
@@ -102,10 +96,6 @@
       <button type="button" id="shareBtn" title="Share this page">&#8599;</button>
       <button type="button" id="refreshBtn" title="Refresh">&#8635;</button>
       <button type="button" id="settingsBtn" title="Settings">&#9881;</button>
-    </div>
-    <div id="privacy-banner">
-      <span>See our <a href="#" id="privacyLink">privacy policy</a>.</span>
-      <button type="button" id="privacyDismiss">Got it</button>
     </div>
   </div>
 
@@ -162,7 +152,6 @@
 
       <div class="row">
         <div><div class="t">About</div><div class="s" id="versionText"></div></div>
-        <a class="link" id="privacyRow" style="display:none">Privacy policy</a>
       </div>
     </div>
   </div>
@@ -234,23 +223,9 @@
     if ($('settingsOverlay').classList.contains('show')) refreshSettings();
   }
 
-  // ---------------------------------------------------------- splash / privacy
+  // ---------------------------------------------------------- splash
   function hideSplash() { $('splash').classList.add('hide'); }
 
-  function setupPrivacy() {
-    const url = cfg.privacy_policy_url;
-    if (!url) return;
-    let seen = false;
-    try { seen = localStorage.getItem('w2a_privacy_seen') === '1'; } catch (e) {}
-    if (!seen) $('privacy-banner').classList.add('show');
-    $('privacyLink').addEventListener('click', (e) => { e.preventDefault(); api.invoke('open-privacy'); });
-    $('privacyDismiss').addEventListener('click', () => {
-      $('privacy-banner').classList.remove('show');
-      try { localStorage.setItem('w2a_privacy_seen', '1'); } catch (e) {}
-    });
-    $('privacyRow').style.display = '';
-    $('privacyRow').addEventListener('click', () => api.invoke('open-privacy'));
-  }
 
   // ---------------------------------------------------------- tabs
   function itemMatches(item, url) {
@@ -487,7 +462,6 @@
     $('shareBtn').addEventListener('click', () => api.invoke('share-current'));
     $('refreshBtn').addEventListener('click', () => api.invoke('reload'));
 
-    setupPrivacy();
     setupSettings();
     setupLock();
     $('qrCancel').addEventListener('click', () => stopQr({ error: 'cancelled' }));

@@ -9,7 +9,7 @@
  *     protection, nav-tab prefetch (lib/*, this file)
  *   - Settings (App lock, Kiosk mode, Notifications, Offline sync, Storage,
  *     Version), share / refresh / settings buttons, bottom tabs, splash,
- *     privacy notice, update banner, crash reports (shell.html)
+ *     update banner, crash reports (shell.html)
  *   - page-facing bridges with the same names as the APK's (AndroidShare,
  *     AndroidPrint, AndroidScanQR, AndroidNotify, AndroidLocation,
  *     AndroidNfc, AndroidRetry) - see guest-preload.js
@@ -730,7 +730,6 @@ function registerIpc() {
         accent_color: config.accent_color,
         splash_enabled: config.splash_enabled,
         filecamera_enabled: config.filecamera_enabled,
-        privacy_policy_url: config.privacy_policy_url,
         nav_items: config.nav_items,
       },
       partition: PARTITION,
@@ -788,7 +787,6 @@ function registerIpc() {
       }
     },
     'lock-now': () => lockNow(),
-    'open-privacy': () => openExternalSafe(config.privacy_policy_url),
     'open-update': () => openExternalSafe(state.updateUrl),
     'qr-result': (res) => {
       if (!res || typeof res !== 'object') return;
