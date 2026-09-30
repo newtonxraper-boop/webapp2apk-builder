@@ -167,6 +167,8 @@ async function main() {
     push_enabled: boolValue('PUSH_ENABLED', false),
     filecamera_enabled: boolValue('FILECAMERA_ENABLED', true),
     kiosk_enabled: boolValue('KIOSK_ENABLED', false),
+    applock_enabled: boolValue('APPLOCK_ENABLED', false),
+    remember_login_enabled: boolValue('REMEMBER_LOGIN_ENABLED', true),
     crash_report_url: cleanUrl(env('CRASH_REPORT_URL', '')),
     privacy_policy_url: cleanUrl(env('PRIVACY_POLICY_URL', '')),
     nav_items: decodeNavItems(env('NAV_ITEMS_B64', '').trim()),
@@ -198,7 +200,7 @@ async function main() {
   console.log(`App URL: ${appUrl}`);
   console.log(`Package name (appId): ${packageName}`);
   console.log(`Primary color: ${primaryColor}  Accent: ${accentColor}`);
-  console.log(`splash_enabled=${cfg.splash_enabled} push_enabled=${cfg.push_enabled} filecamera_enabled=${cfg.filecamera_enabled} kiosk_enabled=${cfg.kiosk_enabled}`);
+  console.log(`splash_enabled=${cfg.splash_enabled} push_enabled=${cfg.push_enabled} filecamera_enabled=${cfg.filecamera_enabled} kiosk_enabled=${cfg.kiosk_enabled} applock_enabled=${cfg.applock_enabled} remember_login_enabled=${cfg.remember_login_enabled}`);
   console.log(`Nav tabs: ${JSON.stringify(cfg.nav_items)}`);
   console.log(`Custom icon applied: ${iconApplied}`);
   console.log(`version_code: ${cfg.version_code}`);

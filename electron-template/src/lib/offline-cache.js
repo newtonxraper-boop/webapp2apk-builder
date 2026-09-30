@@ -23,6 +23,7 @@ const path = require('path');
 const zlib = require('zlib');
 const crypto = require('crypto');
 const { hostOf, sameHost, isSameSiteHost, isHttpUrl } = require('./config');
+const { extractAssetUrls, inlineAssets } = require('./inline-assets');
 
 const SENSITIVE_URL_KEYWORDS = ['login', 'logout', 'signin', 'signup', 'checkout', 'payment', 'cart'];
 
@@ -82,11 +83,16 @@ class PageCache {
    *                                 {status, finalUrl, headers, body:Buffer}
    * @param {number} [opts.maxBytes] override the disk-derived size cap
    * @param {number} [opts.maxFiles]
+   * @param {object} [opts.assetCache] an AssetCache - when given, every
+   *        successfully cached page has its stylesheet/script/image URLs
+   *        extracted and queued for asset caching too, so the page can be
+   *        shown fully styled offline (see inline-assets.js / asset-cache.js).
    */
   constructor(opts) {
     this.dir = opts.dir;
     this.homeUrl = opts.homeUrl;
     this.fetcher = opts.fetcher;
+    this.assetCache = opts.assetCache || null;
     this.maxFiles = opts.maxFiles || MAX_CACHE_FILE_COUNT;
     this.maxBytes = opts.maxBytes || this._computeSizeLimit();
     this._writesSinceScan = 0;
@@ -153,11 +159,19 @@ class PageCache {
     }
   }
 
-  /** data: URL for a cached entry, or null if there's nothing usable. */
-  toDataUrl(entry) {
+  /**
+   * data: URL for a cached entry, or null if there's nothing usable.
+   * When an AssetCache was configured, its stylesheet/script/image
+   * references are inlined so the page looks right with no network at all.
+   */
+  toDataUrl(entry, pageUrl) {
     if (!entry || !isHtmlType(entry.mime)) return null;
     const charset = /^[A-Za-z0-9_\-:.]+$/.test(entry.encoding) ? entry.encoding : 'UTF-8';
-    return 'data:' + entry.mime + ';charset=' + charset + ';base64,' + entry.body.toString('base64');
+    let html = entry.body.toString(/^utf-?8$/i.test(entry.encoding) ? 'utf8' : 'utf8');
+    if (this.assetCache && pageUrl) {
+      try { html = inlineAssets(html, pageUrl, this.assetCache.lookup()); } catch (e) { /* serve as-is */ }
+    }
+    return 'data:' + entry.mime + ';charset=' + charset + ';base64,' + Buffer.from(html, 'utf8').toString('base64');
   }
 
   _write(url, { mime, encoding, etag, lastModified, body }) {
@@ -235,6 +249,14 @@ class PageCache {
         });
       } catch (e) {
         return { stored: false, reason: 'disk', error: e && e.message };
+      }
+      if (this.assetCache) {
+        // Best-effort, doesn't block the caller or affect the "page cached"
+        // result if it fails or is slow.
+        try {
+          const urls = extractAssetUrls(body.toString('utf8'), url);
+          this.assetCache.fetchAll(urls).catch(() => {});
+        } catch (e) { /* malformed HTML - the page itself still cached fine */ }
       }
       return { stored: true, status: res.status };
     }

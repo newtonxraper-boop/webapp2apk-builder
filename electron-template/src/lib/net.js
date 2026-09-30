@@ -132,6 +132,22 @@ function makePageFetcher(session) {
   };
 }
 
+/** fetcher for AssetCache: same-site redirects only, no conditional headers (assets are re-fetched fresh each time their page is re-cached). */
+function makeAssetFetcher(session) {
+  return async (url) => {
+    const requestHost = hostOf(url);
+    const res = await request({
+      url,
+      session,
+      useSessionCookies: true,
+      timeoutMs: 8000,
+      onRedirect: (status, location) => isSameSiteHost(requestHost, hostOf(location)),
+    });
+    if (res.redirected) return { status: res.status, headers: {}, body: Buffer.alloc(0), finalUrl: res.location };
+    return res;
+  };
+}
+
 /** sender for OfflineQueue: replays a queued request with the live session cookies. */
 function makeQueueSender(session) {
   return async (req) => {
@@ -169,4 +185,4 @@ async function fetchJson(url, timeoutMs) {
   return JSON.parse(res.body.toString('utf8'));
 }
 
-module.exports = { request, makePageFetcher, makeQueueSender, makeProbeRequester, fetchJson };
+module.exports = { request, makePageFetcher, makeAssetFetcher, makeQueueSender, makeProbeRequester, fetchJson };

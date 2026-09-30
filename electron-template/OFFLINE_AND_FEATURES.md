@@ -31,3 +31,21 @@ The Windows (.exe) and macOS (.dmg) apps are built from the same settings as the
 
 ## Tests
 `npm test` (Node 18+) runs the offline logic tests and a main-process smoke test against a mocked Electron.
+
+## Newly added (this round)
+
+- **Offline pages actually look right now.** Cached pages used to save only the raw HTML - their CSS, JS and images still hit the network and failed offline, so a cached page rendered unstyled. Now every page's stylesheet/script/image references are fetched and cached alongside it (`lib/asset-cache.js`), and inlined directly into the page when it's shown offline (`lib/inline-assets.js`) - no more network requests needed at all to render it.
+- **Required app lock, set at build time.** A new "Require app lock" toggle on the build form - for shared/public computers. When on: the app opens straight to a "create your PIN" screen on first run (can't be skipped or dismissed), and once a PIN exists, "Turn off app lock" in Settings simply doesn't work anymore - it's not offered as an option. Regular (opt-in, user-controlled) app lock still works exactly as before when this isn't set.
+
+Tests: 86 passing (`npm test`), including a full round-trip of the forced-PIN-setup flow through the real `main.js` IPC handlers against a mocked Electron.
+
+## Keep people logged in (build-time toggle)
+
+New "Keep people logged in" toggle on the build form, on by default (matches the existing behavior):
+
+- **On** (default): a successful login is remembered on that computer (encrypted with the OS's own key store) and auto-filled/submitted next time, same as before.
+- **Off**: nothing is ever captured or saved - useful for shared/public computers, alongside the app-lock toggle above.
+
+Either way, people can clear a saved login themselves from Settings ("Forget saved login") - shown only when the feature is on. Signing out of the site as normal also still clears it, same as before.
+
+Tests: 87 passing, including a full round-trip through the real `main.js` IPC handlers proving that nothing is written to disk while the feature is off, and that a saved login survives being re-enabled/disabled correctly.

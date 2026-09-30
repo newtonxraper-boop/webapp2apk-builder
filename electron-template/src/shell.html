@@ -145,6 +145,11 @@
         <button class="btn secondary" type="button" id="clearCacheBtn">Clear offline cache</button>
       </div>
 
+      <div class="row" id="loginRow" style="display:none">
+        <div><div class="t">Saved login</div><div class="s" id="loginStatus">No login saved on this computer</div></div>
+        <button class="btn secondary" type="button" id="forgetLoginBtn" disabled>Forget saved login</button>
+      </div>
+
       <div class="row" id="updateRow" style="display:none">
         <div><div class="t">Update available</div><div class="s">A newer version of this app can be downloaded.</div></div>
         <button class="btn" type="button" id="updateBtn">Download</button>
@@ -161,11 +166,22 @@
     <div class="card">
       <img id="lockIcon" src="icon.png" alt="" onerror="this.style.display='none'">
       <h2 style="justify-content:center"><span id="lockTitle">Locked</span></h2>
-      <input class="text" type="password" id="lockPin" placeholder="Enter PIN" autocomplete="off">
-      <div class="err" id="lockErr"></div>
-      <div style="display:flex; gap:8px; justify-content:center; margin-top:6px">
-        <button class="btn" type="button" id="lockUnlock">Unlock</button>
-        <button class="btn secondary" type="button" id="lockTouch" style="display:none">Use Touch ID</button>
+      <p class="s" id="lockSetupNote" style="display:none; margin: -4px 0 10px">This computer requires a PIN before the app can be used.</p>
+
+      <div id="lockEntryForm">
+        <input class="text" type="password" id="lockPin" placeholder="Enter PIN" autocomplete="off">
+        <div class="err" id="lockErr"></div>
+        <div style="display:flex; gap:8px; justify-content:center; margin-top:6px">
+          <button class="btn" type="button" id="lockUnlock">Unlock</button>
+          <button class="btn secondary" type="button" id="lockTouch" style="display:none">Use Touch ID</button>
+        </div>
+      </div>
+
+      <div id="lockSetupForm" style="display:none">
+        <input class="text" type="password" id="lockSetupNew" placeholder="Choose a PIN (4-32 characters)" autocomplete="off">
+        <input class="text" type="password" id="lockSetupConfirm" placeholder="Repeat PIN" autocomplete="off">
+        <div class="err" id="lockSetupErr"></div>
+        <button class="btn" type="button" id="lockSetupSave" style="width:100%">Set PIN and continue</button>
       </div>
     </div>
   </div>
@@ -219,7 +235,7 @@
     const q = s.queueSize || 0;
     $('syncBanner').classList.toggle('show', q > 0);
     $('syncText').textContent = q === 1 ? '1 item waiting to sync' : q + ' items waiting to sync';
-    if (s.locked) showLock(); else $('lockOverlay').classList.remove('show');
+    if (s.locked) showLock(!!s.lockSetupRequired); else $('lockOverlay').classList.remove('show');
     if ($('settingsOverlay').classList.contains('show')) refreshSettings();
   }
 
@@ -264,7 +280,10 @@
     const s = await api.invoke('get-settings');
     if (!s) return;
     $('lockSwitch').checked = !!s.appLock;
-    $('lockSwitch').disabled = false;
+    $('lockSwitch').disabled = !!s.appLockRequired;
+    $('lockSub').textContent = s.appLockRequired
+      ? 'Required on this installation - cannot be turned off here'
+      : 'Require a PIN to open this app';
     $('kioskSwitch').checked = !!s.kiosk;
     $('notifSwitch').checked = !!s.notifications;
     $('notifSub').textContent = s.pushBuild
@@ -274,6 +293,9 @@
     $('syncStatus').textContent = q === 0 ? 'Up to date'
       : (q === 1 ? '1 change waiting to sync' : q + ' changes waiting to sync') + (s.lastSyncError ? ' \u00b7 ' + s.lastSyncError : '');
     $('cacheStatus').textContent = 'Offline cache: ' + fmtBytes(s.cacheBytes || 0);
+    $('loginRow').style.display = s.rememberLoginEnabled ? '' : 'none';
+    $('loginStatus').textContent = s.hasSavedLogin ? 'A login is saved on this computer' : 'No login saved on this computer';
+    $('forgetLoginBtn').disabled = !s.hasSavedLogin;
     $('updateRow').style.display = s.updateUrl ? '' : 'none';
     $('versionText').textContent = 'Version ' + s.version + (s.versionCode ? ' (' + s.versionCode + ')' : '');
   }
@@ -327,17 +349,23 @@
     $('notifSwitch').addEventListener('change', () => api.invoke('set-notifications', $('notifSwitch').checked));
     $('settingsSyncNow').addEventListener('click', () => api.invoke('sync-now'));
     $('clearCacheBtn').addEventListener('click', async () => { await api.invoke('clear-cache'); refreshSettings(); });
+    $('forgetLoginBtn').addEventListener('click', async () => { await api.invoke('forget-login'); refreshSettings(); });
     $('updateBtn').addEventListener('click', () => api.invoke('open-update'));
   }
 
   // ---------------------------------------------------------- lock screen
-  async function showLock() {
+  async function showLock(setupRequired) {
     const el = $('lockOverlay');
-    if (el.classList.contains('show')) return;
     $('lockTitle').textContent = cfg ? cfg.app_name : 'Locked';
+    $('lockSetupNote').style.display = setupRequired ? '' : 'none';
+    $('lockEntryForm').style.display = setupRequired ? 'none' : '';
+    $('lockSetupForm').style.display = setupRequired ? '' : 'none';
+    if (el.classList.contains('show')) return;
     $('lockPin').value = ''; $('lockErr').textContent = '';
+    $('lockSetupNew').value = ''; $('lockSetupConfirm').value = ''; $('lockSetupErr').textContent = '';
     el.classList.add('show');
     $('settingsOverlay').classList.remove('show');
+    if (setupRequired) { setTimeout(() => $('lockSetupNew').focus(), 50); return; }
     setTimeout(() => $('lockPin').focus(), 50);
     const s = await api.invoke('get-settings');
     $('lockTouch').style.display = s && s.canTouchId ? '' : 'none';
@@ -352,10 +380,20 @@
       ? 'Too many attempts. Try again in ' + Math.ceil(r.retryInMs / 1000) + 's.'
       : 'Incorrect PIN.';
   }
+  async function tryLockSetup() {
+    const a = $('lockSetupNew').value, b = $('lockSetupConfirm').value;
+    if (a.length < 4 || a.length > 32) { $('lockSetupErr').textContent = 'Use 4 to 32 characters.'; return; }
+    if (a !== b) { $('lockSetupErr').textContent = "The two PINs don't match."; return; }
+    const ok = await api.invoke('lock-set-pin', a);
+    if (!ok) { $('lockSetupErr').textContent = 'Could not set the PIN. Try again.'; return; }
+    $('lockSetupNew').value = ''; $('lockSetupConfirm').value = ''; $('lockSetupErr').textContent = '';
+  }
   function setupLock() {
     $('lockUnlock').addEventListener('click', tryUnlock);
     $('lockTouch').addEventListener('click', tryTouchId);
     $('lockPin').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryUnlock(); });
+    $('lockSetupSave').addEventListener('click', tryLockSetup);
+    $('lockSetupConfirm').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryLockSetup(); });
   }
 
   // ---------------------------------------------------------- QR / barcode scanner

@@ -28,6 +28,7 @@ const fs = require('fs');
 const { loadConfig, hostOf, sameHost, isSameSiteHost, isHttpUrl } = require('./lib/config');
 const { Store } = require('./lib/store');
 const { PageCache, isSensitiveUrl } = require('./lib/offline-cache');
+const { AssetCache } = require('./lib/asset-cache');
 const { OfflineQueue } = require('./lib/offline-queue');
 const { Connectivity } = require('./lib/connectivity');
 const { probe } = require('./lib/reachability');
@@ -56,6 +57,7 @@ let guest = null; // the <webview>'s webContents
 let store = null;
 let ses = null;
 let cache = null;
+let assetCache = null;
 let queue = null;
 let connectivity = null;
 let vault = null;
@@ -114,6 +116,7 @@ function publicState() {
     lastSyncError: state.lastSyncError,
     updateUrl: state.updateUrl,
     locked: state.locked,
+    lockSetupRequired: !!(applock && applock.needsSetup()),
     kiosk: isKiosk(),
   };
 }
@@ -218,7 +221,7 @@ function navigateGuest(url) {
 async function showOfflineFallback(contents, failedUrl) {
   if (!isLive(contents)) return;
   const entry = cache ? cache.read(failedUrl) : null;
-  const dataUrl = entry ? cache.toDataUrl(entry) : null;
+  const dataUrl = entry ? cache.toDataUrl(entry, failedUrl) : null;
   if (dataUrl) {
     state.view = 'cached';
     state.showingCachedFor = failedUrl;
@@ -551,7 +554,7 @@ function onMainFrameCommitted(url) {
   // (i.e. it actually worked), mirroring the APK's onPageFinished logic.
   const cameFromLogin = state.lastPageUrl && isSensitiveUrl(state.lastPageUrl);
   const nowOnNonLogin = !isSensitiveUrl(url);
-  if (cameFromLogin && nowOnNonLogin && state.pendingCredentials && vault) {
+  if (cameFromLogin && nowOnNonLogin && state.pendingCredentials && vault && config.remember_login_enabled) {
     vault.save(state.pendingCredentials.u, state.pendingCredentials.p);
     state.pendingCredentials = null;
   }
@@ -648,16 +651,23 @@ function isGuestSender(sender) {
 
 function settingsSnapshot() {
   let cacheStats = { files: 0, bytes: 0 };
+  let assetStats = { files: 0, bytes: 0 };
   try { cacheStats = cache.stats(); } catch (e) { /* ignore */ }
+  try { assetStats = assetCache.stats(); } catch (e) { /* ignore */ }
+  let hasSavedLogin = false;
+  try { hasSavedLogin = !!config.remember_login_enabled && vault.get() !== null; } catch (e) { /* ignore */ }
   return {
     appLock: applock.isEnabled(),
+    appLockRequired: !!config.applock_enabled,
     canTouchId: canTouchId(),
     kiosk: isKiosk(),
     notifications: notificationsAllowed(),
     pushBuild: !!config.push_enabled,
+    rememberLoginEnabled: !!config.remember_login_enabled,
+    hasSavedLogin,
     queueSize: state.queueSize,
     lastSyncError: state.lastSyncError,
-    cacheBytes: cacheStats.bytes,
+    cacheBytes: cacheStats.bytes + assetStats.bytes,
     version: app.getVersion(),
     versionCode: config.version_code,
     platform: process.platform,
@@ -746,9 +756,16 @@ function registerIpc() {
       shareUrlOrText({ urls: [url] });
     },
     'clear-cache': () => {
-      const n = cache.clear();
+      const n = cache.clear() + assetCache.clear();
       toast('Offline cache cleared');
       return n;
+    },
+    'forget-login': () => {
+      const had = vault.get() !== null;
+      vault.clear();
+      state.pendingCredentials = null;
+      if (had) toast('Saved login forgotten');
+      return true;
     },
     'get-settings': () => settingsSnapshot(),
     'set-kiosk': (on) => {
@@ -763,6 +780,7 @@ function registerIpc() {
     },
     'lock-set-pin': (pin) => {
       const ok = applock.setPin(typeof pin === 'string' ? pin : '');
+      if (ok) state.locked = false; // covers the forced first-run setup case; a no-op if it was already unlocked
       broadcastState();
       return ok;
     },
@@ -820,7 +838,7 @@ function registerIpc() {
       online: isOnline(),
       platform: process.platform,
       script: trusted ? buildInjection({ maxFileBytes: MAX_QUEUEABLE_FILE_BYTES, baseUrl: href }) : null,
-      credentials: trusted && vault.available(),
+      credentials: trusted && config.remember_login_enabled && vault.available(),
     };
   });
 
@@ -866,11 +884,11 @@ function registerIpc() {
     if (isGuestSender(event.sender)) startQrScan();
   });
   ipcMain.on('w2a:cred-capture', (event, u, p) => {
-    if (!isGuestSender(event.sender)) return;
+    if (!isGuestSender(event.sender) || !config.remember_login_enabled) return;
     if (typeof u === 'string' && typeof p === 'string' && u && p) state.pendingCredentials = { u, p };
   });
   ipcMain.handle('w2a:cred-get', (event) => {
-    if (!isGuestSender(event.sender)) return null;
+    if (!isGuestSender(event.sender) || !config.remember_login_enabled) return null;
     if (state.skipAutoLoginOnce) {
       state.skipAutoLoginOnce = false;
       return null;
@@ -968,10 +986,16 @@ function start() {
     store = new Store(path.join(userData, 'settings.json'));
     setupSession();
 
+    assetCache = new AssetCache({
+      dir: path.join(userData, 'assetcache'),
+      homeUrl: config.app_url,
+      fetcher: netutil.makeAssetFetcher(ses),
+    });
     cache = new PageCache({
       dir: path.join(userData, 'webcache'),
       homeUrl: config.app_url,
       fetcher: netutil.makePageFetcher(ses),
+      assetCache,
     });
     queue = new OfflineQueue({
       file: path.join(userData, 'offline_queue.jsonl'),
@@ -980,7 +1004,7 @@ function start() {
       allowUrl: (u) => isAllowedTarget(u),
     });
     vault = new CredentialVault(store, safeStorage);
-    applock = new AppLock(store);
+    applock = new AppLock(store, undefined, config.applock_enabled);
     notifier = new Notifier(store, (title, body) => {
       if (!Notification.isSupported()) return;
       const n = new Notification({ title: title || config.app_name, body });
@@ -1014,7 +1038,7 @@ function start() {
     });
     connectivity.start();
 
-    state.locked = applock.isEnabled();
+    state.locked = applock.isEnabled() || applock.needsSetup();
     refreshQueueSize();
 
     registerIpc();

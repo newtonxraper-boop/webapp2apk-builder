@@ -223,3 +223,102 @@ test('app lock + settings round-trip through the shell IPC', async () => {
   assert.strictEqual(await call('lock-disable', '4821'), true);
   assert.strictEqual(typeof (await call('clear-cache')), 'number');
 });
+
+test('applock_enabled at build time forces PIN setup on first run and blocks disabling later', async () => {
+  const cfgPath = path.join(__dirname, '..', 'src', 'app_config.json');
+  const original = fs.readFileSync(cfgPath, 'utf8');
+  // fresh userData dir so there's no PIN already saved from an earlier test
+  const freshUserData = tmpDir('w2a-main-applock-');
+  electronMock.app.getPath = () => freshUserData;
+  fs.writeFileSync(cfgPath, JSON.stringify({ app_name: 'Shop', app_url: HOME, package_name: 'com.acme.shop', applock_enabled: true }));
+  try {
+    delete require.cache[require.resolve('../src/main.js')];
+    require('../src/main.js');
+    await wait(50);
+  } finally {
+    fs.writeFileSync(cfgPath, original);
+  }
+
+  const call = (name, arg) => ipcHandlers['shell:invoke']({ sender: FakeWindow.last.webContents }, name, arg);
+  const boot = await call('boot');
+  assert.strictEqual(boot.state.locked, true, 'app opens locked when app lock is required and no PIN exists yet');
+  assert.strictEqual(boot.state.lockSetupRequired, true);
+  assert.strictEqual(boot.settings.appLockRequired, true);
+  assert.strictEqual(boot.settings.appLock, false);
+
+  assert.strictEqual(await call('lock-set-pin', '7777'), true);
+  const after = await call('get-settings');
+  assert.strictEqual(after.appLock, true);
+  const state2 = await ipcHandlers['shell:invoke']({ sender: FakeWindow.last.webContents }, 'boot');
+  assert.strictEqual(state2.state.locked, false, 'unlocks automatically once the forced setup PIN is created');
+  assert.strictEqual(state2.state.lockSetupRequired, false);
+
+  // and it genuinely cannot be turned off from Settings on this build
+  assert.strictEqual(await call('lock-disable', '7777'), false);
+  assert.strictEqual((await call('get-settings')).appLock, true);
+});
+
+test('remember_login_enabled=false blocks saving/returning a login; forget-login clears one when it is enabled', async () => {
+  const cfgPath = path.join(__dirname, '..', 'src', 'app_config.json');
+  const original = fs.readFileSync(cfgPath, 'utf8');
+  const sharedUserData = tmpDir('w2a-main-remember-');
+  // vault needs a working encrypt/decrypt to actually persist anything
+  const originalSafeStorage = electronMock.safeStorage;
+  electronMock.safeStorage = {
+    isEncryptionAvailable: () => true,
+    encryptString: (s) => Buffer.from('ENC:' + s),
+    decryptString: (b) => b.toString().slice(4),
+  };
+
+  function reboot(cfg) {
+    fs.writeFileSync(cfgPath, JSON.stringify(Object.assign({ app_name: 'Shop', app_url: HOME, package_name: 'com.acme.shop' }, cfg)));
+    electronMock.app.getPath = () => sharedUserData;
+    delete require.cache[require.resolve('../src/main.js')];
+    require('../src/main.js');
+    return wait(50);
+  }
+  function simulateLogin(guest, u, p) {
+    ipcOn['w2a:cred-capture']({ sender: guest }, u, p);
+    guest.emit('did-navigate', {}, HOME + 'login'); // onMainFrameCommitted tracks lastPageUrl
+    guest.emit('did-navigate', {}, HOME + 'dashboard'); // moving off a login page triggers the save
+  }
+
+  try {
+    // ---- disabled: nothing is captured or offered, even though vault encryption works fine
+    await reboot({ remember_login_enabled: false });
+    let guest = new WC('webview');
+    electronMock.app.emit('web-contents-created', {}, guest);
+    const bootDisabled = await new Promise((resolve) => ipcOn['w2a:boot']({ sender: guest, set returnValue(v) { resolve(v); } }, HOME + 'login'));
+    assert.strictEqual(bootDisabled.credentials, false);
+    simulateLogin(guest, 'amina@example.com', 'hunter2');
+    await wait(20);
+    const settingsDisabled = await ipcHandlers['shell:invoke']({ sender: FakeWindow.last.webContents }, 'get-settings');
+    assert.strictEqual(settingsDisabled.rememberLoginEnabled, false);
+    assert.strictEqual(settingsDisabled.hasSavedLogin, false);
+    assert.strictEqual(await ipcHandlers['w2a:cred-get']({ sender: guest }), null);
+
+    // ---- re-enabled, same userData dir: proves nothing leaked to disk while it was off
+    await reboot({ remember_login_enabled: true });
+    guest = new WC('webview');
+    electronMock.app.emit('web-contents-created', {}, guest);
+    assert.strictEqual(await ipcHandlers['w2a:cred-get']({ sender: guest }), null);
+
+    const bootEnabled = await new Promise((resolve) => ipcOn['w2a:boot']({ sender: guest, set returnValue(v) { resolve(v); } }, HOME + 'login'));
+    assert.strictEqual(bootEnabled.credentials, true);
+    simulateLogin(guest, 'amina@example.com', 'hunter2');
+    await wait(20);
+    const saved = await ipcHandlers['w2a:cred-get']({ sender: guest });
+    assert.deepStrictEqual(saved, { u: 'amina@example.com', p: 'hunter2' });
+    const settingsEnabled = await ipcHandlers['shell:invoke']({ sender: FakeWindow.last.webContents }, 'get-settings');
+    assert.strictEqual(settingsEnabled.hasSavedLogin, true);
+
+    // ---- Settings -> Forget saved login
+    await ipcHandlers['shell:invoke']({ sender: FakeWindow.last.webContents }, 'forget-login');
+    assert.strictEqual(await ipcHandlers['w2a:cred-get']({ sender: guest }), null);
+    const settingsAfterForget = await ipcHandlers['shell:invoke']({ sender: FakeWindow.last.webContents }, 'get-settings');
+    assert.strictEqual(settingsAfterForget.hasSavedLogin, false);
+  } finally {
+    fs.writeFileSync(cfgPath, original);
+    electronMock.safeStorage = originalSafeStorage;
+  }
+});

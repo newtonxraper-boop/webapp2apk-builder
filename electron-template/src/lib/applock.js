@@ -16,9 +16,18 @@ const MAX_ATTEMPTS_BEFORE_DELAY = 5;
 const LOCKOUT_MS = 30000;
 
 class AppLock {
-  constructor(store, now) {
+  /**
+   * @param {object} store
+   * @param {function} [now]
+   * @param {boolean} [required] set from the build's applock_enabled config -
+   *        when true, the app lock can't be turned off from Settings (for
+   *        shared/public machines), and a PIN must be created before the app
+   *        can be used at all if one hasn't been set yet.
+   */
+  constructor(store, now, required) {
     this.store = store;
     this.now = now || Date.now;
+    this.required = !!required;
     this.failures = 0;
     this.lockedUntil = 0;
   }
@@ -26,6 +35,11 @@ class AppLock {
   isEnabled() {
     const rec = this.store.get('applock', null);
     return !!(rec && rec.enabled && rec.salt && rec.hash);
+  }
+
+  /** True when this build requires app lock but no PIN has been created yet. */
+  needsSetup() {
+    return this.required && !this.isEnabled();
   }
 
   static validPin(pin) {
@@ -73,6 +87,7 @@ class AppLock {
   }
 
   disable(pin) {
+    if (this.required) return false; // this installation requires app lock - it can't be turned off from Settings
     if (!this.verify(pin).ok) return false;
     this.store.delete('applock');
     return true;

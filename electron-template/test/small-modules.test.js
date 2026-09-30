@@ -39,6 +39,27 @@ test('app lock: PIN is hashed, verified, throttled, and needs the PIN to disable
   assert.strictEqual(l.isEnabled(), false);
 });
 
+test('app lock: required-by-build mode forces setup and blocks disabling', () => {
+  const s = mkStore();
+  const l = new AppLock(s, undefined, true);
+  assert.strictEqual(l.isEnabled(), false);
+  assert.strictEqual(l.needsSetup(), true); // required, no PIN yet -> the app must force setup
+  assert.strictEqual(l.setPin('4821'), true);
+  assert.strictEqual(l.needsSetup(), false); // PIN now exists, nothing left to force
+  assert.strictEqual(l.verify('4821').ok, true);
+  assert.strictEqual(l.disable('4821'), false); // correct PIN, but required installations can't turn it off
+  assert.strictEqual(l.isEnabled(), true);
+});
+
+test('app lock: not required -> needsSetup is always false, and disable works normally', () => {
+  const s = mkStore();
+  const l = new AppLock(s, undefined, false);
+  assert.strictEqual(l.needsSetup(), false);
+  l.setPin('1234');
+  assert.strictEqual(l.needsSetup(), false);
+  assert.strictEqual(l.disable('1234'), true);
+});
+
 test('notifier: fires after the delay, cancel works, overdue restored on start', () => {
   let now = 0; const timers = []; const shown = [];
   const t = { now: () => now, setTimeout: (fn, ms) => { const h = { fn, at: now + ms }; timers.push(h); return h; }, clearTimeout: (h) => { h.dead = true; } };
