@@ -108,6 +108,7 @@
     <div class="card">
       <h2><span>Settings</span><button type="button" id="settingsClose" title="Close">&times;</button></h2>
 
+      <div id="lockSection" style="display:none">
       <div class="row">
         <div><div class="t">App lock</div><div class="s" id="lockSub">Require a PIN to open this app</div></div>
         <label class="switch"><input type="checkbox" id="lockSwitch"><span class="slider"></span></label>
@@ -124,13 +125,14 @@
         <div class="err" id="pinOffErr"></div>
         <button class="btn" type="button" id="pinOffSave">Turn off app lock</button>
       </div>
+      </div>
 
-      <div class="row">
+      <div class="row" id="kioskRow" style="display:none">
         <div><div class="t">Kiosk mode</div><div class="s">Runs the app fullscreen - for POS terminals or single-purpose machines. Use Ctrl/Cmd + , to open Settings again.</div></div>
         <label class="switch"><input type="checkbox" id="kioskSwitch"><span class="slider"></span></label>
       </div>
 
-      <div class="row">
+      <div class="row" id="notifRow" style="display:none">
         <div><div class="t">Notifications</div><div class="s" id="notifSub">Allow this app to show desktop notifications</div></div>
         <label class="switch"><input type="checkbox" id="notifSwitch"><span class="slider"></span></label>
       </div>
@@ -279,6 +281,9 @@
   async function refreshSettings() {
     const s = await api.invoke('get-settings');
     if (!s) return;
+    $('lockSection').style.display = s.appLockAvailable ? '' : 'none';
+    $('kioskRow').style.display = s.kioskAvailable ? '' : 'none';
+    $('notifRow').style.display = s.pushBuild ? '' : 'none';
     $('lockSwitch').checked = !!s.appLock;
     $('lockSwitch').disabled = !!s.appLockRequired;
     $('lockSub').textContent = s.appLockRequired

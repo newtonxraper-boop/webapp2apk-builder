@@ -210,17 +210,18 @@ test('back online: the queue is replayed to the site and the shell is told', asy
   assert.ok(shellMsgs.filter((m) => m[0] === 'shell:state').pop()[1].queueSize === 0);
 });
 
-test('app lock + settings round-trip through the shell IPC', async () => {
+test('features left out of the build are inert and hidden from settings', async () => {
   const call = (name, arg) => ipcHandlers['shell:invoke']({ sender: FakeWindow.last.webContents }, name, arg);
-  assert.strictEqual(await call('lock-set-pin', '12'), false);
-  assert.strictEqual(await call('lock-set-pin', '4821'), true);
-  assert.strictEqual((await call('get-settings')).appLock, true);
-  assert.strictEqual((await call('lock-verify', '0000')).ok, false);
-  assert.strictEqual((await call('lock-verify', '4821')).ok, true);
-  assert.strictEqual(await call('set-kiosk', true), true);
-  assert.strictEqual(FakeWindow.last.kiosk, true);
+  // default config has app lock and kiosk switched off
+  assert.strictEqual(await call('lock-set-pin', '4821'), false);
+  assert.strictEqual(await call('lock-disable', '4821'), false);
+  assert.strictEqual(await call('set-kiosk', true), false);
+  const s = await call('get-settings');
+  assert.strictEqual(s.appLockAvailable, false);
+  assert.strictEqual(s.appLock, false);
+  assert.strictEqual(s.kioskAvailable, false);
+  assert.strictEqual(s.kiosk, false);
   assert.strictEqual(await call('set-notifications', false), false);
-  assert.strictEqual(await call('lock-disable', '4821'), true);
   assert.strictEqual(typeof (await call('clear-cache')), 'number');
 });
 

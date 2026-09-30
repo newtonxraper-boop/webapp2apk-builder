@@ -102,6 +102,7 @@ function isOnline() {
 }
 
 function isKiosk() {
+  if (!config.kiosk_enabled) return false; // feature not included in this build
   return store.has('kiosk_override') ? !!store.get('kiosk_override') : !!config.kiosk_enabled;
 }
 
@@ -116,7 +117,7 @@ function publicState() {
     lastSyncError: state.lastSyncError,
     updateUrl: state.updateUrl,
     locked: state.locked,
-    lockSetupRequired: !!(applock && applock.needsSetup()),
+    lockSetupRequired: !!(config.applock_enabled && applock && applock.needsSetup()),
     kiosk: isKiosk(),
   };
 }
@@ -384,7 +385,7 @@ function applyKiosk() {
 }
 
 function lockNow() {
-  if (applock && applock.isEnabled()) {
+  if (config.applock_enabled && applock && applock.isEnabled()) {
     state.locked = true;
     broadcastState();
   }
@@ -657,8 +658,10 @@ function settingsSnapshot() {
   let hasSavedLogin = false;
   try { hasSavedLogin = !!config.remember_login_enabled && vault.get() !== null; } catch (e) { /* ignore */ }
   return {
-    appLock: applock.isEnabled(),
+    appLock: !!config.applock_enabled && applock.isEnabled(),
+    appLockAvailable: !!config.applock_enabled,
     appLockRequired: !!config.applock_enabled,
+    kioskAvailable: !!config.kiosk_enabled,
     canTouchId: canTouchId(),
     kiosk: isKiosk(),
     notifications: notificationsAllowed(),
@@ -769,6 +772,7 @@ function registerIpc() {
     },
     'get-settings': () => settingsSnapshot(),
     'set-kiosk': (on) => {
+      if (!config.kiosk_enabled) return false;
       store.set('kiosk_override', !!on);
       applyKiosk();
       broadcastState();
@@ -779,12 +783,13 @@ function registerIpc() {
       return notificationsAllowed();
     },
     'lock-set-pin': (pin) => {
+      if (!config.applock_enabled) return false;
       const ok = applock.setPin(typeof pin === 'string' ? pin : '');
       if (ok) state.locked = false; // covers the forced first-run setup case; a no-op if it was already unlocked
       broadcastState();
       return ok;
     },
-    'lock-disable': (pin) => applock.disable(typeof pin === 'string' ? pin : ''),
+    'lock-disable': (pin) => !config.applock_enabled ? false : applock.disable(typeof pin === 'string' ? pin : ''),
     'lock-verify': (pin) => {
       const r = applock.verify(typeof pin === 'string' ? pin : '');
       if (r.ok) {
@@ -794,6 +799,7 @@ function registerIpc() {
       return r;
     },
     'lock-touchid': async () => {
+      if (!config.applock_enabled) return false;
       if (!canTouchId()) return false;
       try {
         await systemPreferences.promptTouchID('unlock ' + config.app_name);
@@ -1038,7 +1044,7 @@ function start() {
     });
     connectivity.start();
 
-    state.locked = applock.isEnabled() || applock.needsSetup();
+    state.locked = !!config.applock_enabled && (applock.isEnabled() || applock.needsSetup());
     refreshQueueSize();
 
     registerIpc();
