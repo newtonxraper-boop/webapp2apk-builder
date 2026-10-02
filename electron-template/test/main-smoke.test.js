@@ -323,3 +323,116 @@ test('remember_login_enabled=false blocks saving/returning a login; forget-login
     electronMock.safeStorage = originalSafeStorage;
   }
 });
+
+test('external_links_in_app: other websites open in the browser by default, or stay inside the app when enabled', async () => {
+  const cfgPath = path.join(__dirname, '..', 'src', 'app_config.json');
+  const original = fs.readFileSync(cfgPath, 'utf8');
+  const userData = tmpDir('w2a-main-extlinks-');
+  const opened = [];
+  const originalOpen = electronMock.shell.openExternal;
+  electronMock.shell.openExternal = async (u) => { opened.push(u); };
+  const OTHER = 'https://other-site.test/page';
+
+  async function boot(inApp) {
+    fs.writeFileSync(cfgPath, JSON.stringify({
+      app_name: 'Shop', app_url: HOME, package_name: 'com.acme.shop', external_links_in_app: inApp,
+      nav_items: [{ label: 'Docs', url: OTHER, icon: 'D' }],
+    }));
+    electronMock.app.getPath = () => userData;
+    // earlier tests' main.js instances are still listening on the shared mock - drop them so each link is handled once
+    electronMock.app.removeAllListeners('web-contents-created');
+    delete require.cache[require.resolve('../src/main.js')];
+    require('../src/main.js');
+    await wait(50);
+    const guest = new WC('webview');
+    electronMock.app.emit('web-contents-created', {}, guest);
+    return guest;
+  }
+
+  try {
+    // ---- default: redirect other domains out of the app
+    let guest = await boot(false);
+    assert.strictEqual(guest.openHandler({ url: OTHER }).action, 'deny');
+    assert.deepStrictEqual(opened, [OTHER]);
+    let ev = { prevented: false, preventDefault() { this.prevented = true; } };
+    guest.emit('will-navigate', ev, OTHER);
+    assert.strictEqual(ev.prevented, true, 'navigation to another site is cancelled');
+    assert.strictEqual(opened.length, 2);
+    await ipcHandlers['shell:invoke']({ sender: FakeWindow.last.webContents }, 'open-link', OTHER);
+    assert.strictEqual(opened.length, 3, 'nav button for another site opens the browser');
+    // the app's own site still loads inside the app
+    assert.strictEqual(guest.openHandler({ url: HOME + 'x' }).action, 'allow');
+
+    // ---- enabled: other domains stay inside the app
+    opened.length = 0;
+    guest = await boot(true);
+    assert.strictEqual(guest.openHandler({ url: OTHER }).action, 'deny');
+    await wait(10);
+    assert.ok(guest.loaded.some((l) => l.url === OTHER), 'popup/new-tab link loads in the app view');
+    ev = { prevented: false, preventDefault() { this.prevented = true; } };
+    guest.emit('will-navigate', ev, OTHER);
+    assert.strictEqual(ev.prevented, false, 'navigation is allowed to proceed');
+    await ipcHandlers['shell:invoke']({ sender: FakeWindow.last.webContents }, 'open-link', 'https://third.test/');
+    await wait(10);
+    assert.ok(guest.loaded.some((l) => l.url === 'https://third.test/'));
+    assert.strictEqual(opened.length, 0, 'nothing is handed to the system browser');
+    // pages on other sites still get no app features
+    const b = await new Promise((resolve) => ipcOn['w2a:boot']({ sender: guest, set returnValue(v) { resolve(v); } }, OTHER));
+    assert.strictEqual(b.trusted, false);
+  } finally {
+    fs.writeFileSync(cfgPath, original);
+    electronMock.shell.openExternal = originalOpen;
+  }
+});
+
+test('update check asks the build site with domain + name and only offers a download hosted on that site', async () => {
+  const cfgPath = path.join(__dirname, '..', 'src', 'app_config.json');
+  const original = fs.readFileSync(cfgPath, 'utf8');
+  const userData = tmpDir('w2a-main-update-');
+  const originalNet = netBehavior;
+  let answer = { update: false };
+
+  async function boot(extra) {
+    fs.writeFileSync(cfgPath, JSON.stringify(Object.assign({
+      app_name: 'My Shop', app_url: 'https://www.Shop.com/app', package_name: 'com.acme.shop',
+      update_check_url: 'https://builder.test/update.php', build_id: 'abcdef0123456789',
+    }, extra)));
+    electronMock.app.getPath = () => userData;
+    electronMock.app.removeAllListeners('web-contents-created');
+    delete require.cache[require.resolve('../src/main.js')];
+    require('../src/main.js');
+    await wait(250);
+    return ipcHandlers['shell:invoke']({ sender: FakeWindow.last.webContents }, 'get-settings');
+  }
+  netBehavior = (o) => {
+    if (String(o.url).startsWith('https://builder.test/update.php')) return { status: 200, headers: {}, body: JSON.stringify(answer) };
+    return { status: 200, headers: {}, body: '' };
+  };
+
+  try {
+    // no update -> nothing offered; request carries the major domain, name, platform and build id
+    requests.length = 0;
+    let s = await boot();
+    assert.strictEqual(s.updateUrl, null);
+    const q = new URL(String(requests.find((r) => String(r.url).startsWith('https://builder.test/update.php')).url));
+    assert.strictEqual(q.searchParams.get('domain'), 'shop.com', 'www. is dropped, host lower-cased');
+    assert.strictEqual(q.searchParams.get('name'), 'My Shop');
+    assert.ok(['windows', 'macos'].includes(q.searchParams.get('platform')));
+    assert.strictEqual(q.searchParams.get('build'), 'abcdef0123456789');
+
+    // a download on a different host is refused
+    answer = { update: true, download_url: 'https://evil.test/app.exe' };
+    fs.rmSync(userData, { recursive: true, force: true }); fs.mkdirSync(userData, { recursive: true });
+    s = await boot();
+    assert.strictEqual(s.updateUrl, null);
+
+    // a download on the build site is offered
+    answer = { update: true, download_url: 'https://builder.test/downloads/shop.exe' };
+    fs.rmSync(userData, { recursive: true, force: true }); fs.mkdirSync(userData, { recursive: true });
+    s = await boot();
+    assert.strictEqual(s.updateUrl, 'https://builder.test/downloads/shop.exe');
+  } finally {
+    fs.writeFileSync(cfgPath, original);
+    netBehavior = originalNet;
+  }
+});

@@ -25,7 +25,7 @@ const {
 const path = require('path');
 const fs = require('fs');
 
-const { loadConfig, hostOf, sameHost, isSameSiteHost, isHttpUrl } = require('./lib/config');
+const { loadConfig, hostOf, sameHost, isSameSiteHost, isHttpUrl, siteDomain } = require('./lib/config');
 const { Store } = require('./lib/store');
 const { PageCache, isSensitiveUrl } = require('./lib/offline-cache');
 const { AssetCache } = require('./lib/asset-cache');
@@ -211,8 +211,15 @@ function openUrlArg(argv) {
   return isAllowedTarget(url) ? url : null;
 }
 
+// Menu items / nav buttons: the app's own site always loads in the app; any
+// other website follows the build option (inside the app, or the default browser).
 function navigateGuest(url) {
-  if (isLive(guest) && isAllowedTarget(url)) guest.loadURL(url).catch(() => {});
+  if (!isHttpUrl(url)) return;
+  if (isAllowedTarget(url) || config.external_links_in_app) {
+    if (isLive(guest)) guest.loadURL(url).catch(() => {});
+  } else {
+    openExternalSafe(url);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -352,12 +359,35 @@ async function prefetchNavTabs() {
 // update check (<site>/version.json - same file the Android build reads)
 // ---------------------------------------------------------------------------
 
+// Asks the build site (update_check_url, baked in at build time) whether a
+// newer build of THIS app exists. The app identifies itself by its major
+// domain + its name (plus the id of the build it came from, which the server
+// uses to make sure only the same account's newer builds are ever offered).
+async function checkBuildSiteForUpdate() {
+  const u = new URL(config.update_check_url);
+  u.searchParams.set('domain', siteDomain(config.app_url));
+  u.searchParams.set('name', config.app_name);
+  u.searchParams.set('platform', process.platform === 'darwin' ? 'macos' : 'windows');
+  u.searchParams.set('build', config.build_id);
+  const info = await netutil.fetchJson(u.toString(), 5000);
+  if (!info || info.update !== true) return;
+  const url = String(info.download_url || '');
+  // only ever offer a download hosted on the build site itself
+  if (!isHttpUrl(url) || hostOf(url) !== hostOf(config.update_check_url)) return;
+  state.updateUrl = url;
+  broadcastState();
+}
+
 async function checkForUpdate() {
   if (!isOnline()) return;
   const last = store.get('last_update_check', 0);
   if (Date.now() - last < UPDATE_CHECK_MIN_INTERVAL_MS) return;
   store.set('last_update_check', Date.now());
   try {
+    if (config.update_check_url && config.build_id) {
+      await checkBuildSiteForUpdate();
+      return;
+    }
     const home = new URL(config.app_url);
     const info = await netutil.fetchJson(home.protocol + '//' + home.host + '/version.json', 5000);
     if (!info) return;
@@ -568,6 +598,12 @@ function attachGuestHandlers(contents) {
 
   contents.setWindowOpenHandler(({ url }) => {
     if (isHttpUrl(url) && sameHost(url, config.app_url)) return { action: 'allow' };
+    if (config.external_links_in_app && isHttpUrl(url)) {
+      // build option: keep other websites inside the app - load them in the
+      // same view rather than opening a separate window
+      if (isLive(guest)) guest.loadURL(url).catch(() => {});
+      return { action: 'deny' };
+    }
     openExternalSafe(url);
     return { action: 'deny' };
   });
@@ -580,7 +616,7 @@ function attachGuestHandlers(contents) {
       if (!/^(file:|data:|about:)/i.test(url)) { e.preventDefault(); shell.openExternal(url).catch(() => {}); }
       return;
     }
-    if (!sameHost(url, config.app_url)) {
+    if (!sameHost(url, config.app_url) && !config.external_links_in_app) {
       e.preventDefault();
       openExternalSafe(url);
     }
@@ -812,6 +848,7 @@ function registerIpc() {
     },
     'lock-now': () => lockNow(),
     'open-update': () => openExternalSafe(state.updateUrl),
+    'open-link': (url) => navigateGuest(typeof url === 'string' ? url : ''),
     'qr-result': (res) => {
       if (!res || typeof res !== 'object') return;
       if (typeof res.text === 'string') {

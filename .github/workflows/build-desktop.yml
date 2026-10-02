@@ -59,6 +59,14 @@ on:
         description: "'true' or 'false' - let the app remember a saved login and auto re-login. Turn off for shared/public computers."
         required: false
         default: 'true'
+      external_links_in_app:
+        description: "'true' or 'false' - 'true' keeps links to other websites inside the app; 'false' opens them in the person's default browser."
+        required: false
+        default: 'false'
+      update_check_url:
+        description: "Build site's update.php address - the app asks it (with its domain + name) whether a newer build exists. Leave blank to disable."
+        required: false
+        default: ''
       nav_items_b64:
         description: 'Base64-encoded JSON array of {icon,label,url} bottom-nav tabs (up to 5)'
         required: false
@@ -105,6 +113,9 @@ jobs:
           KIOSK_ENABLED: ${{ inputs.kiosk_enabled }}
           APPLOCK_ENABLED: ${{ inputs.applock_enabled }}
           REMEMBER_LOGIN_ENABLED: ${{ inputs.remember_login_enabled }}
+          EXTERNAL_LINKS_IN_APP: ${{ inputs.external_links_in_app }}
+          UPDATE_CHECK_URL: ${{ inputs.update_check_url }}
+          BUILD_ID: ${{ inputs.request_id }}
           NAV_ITEMS_B64: ${{ inputs.nav_items_b64 }}
           CRASH_REPORT_URL: ${{ inputs.crash_report_url }}
           PRIVACY_POLICY_URL: ${{ inputs.privacy_policy_url }}

@@ -221,6 +221,12 @@
     if (n < 1024 * 1024) return Math.round(n / 1024) + ' KB';
     return (n / 1024 / 1024).toFixed(1) + ' MB';
   }
+  function isOwnSite(url) {
+    try {
+      const a = new URL(cfg.app_url).hostname.toLowerCase(), b = new URL(url).hostname.toLowerCase();
+      return a === b || b.endsWith('.' + a) || a.endsWith('.' + b);
+    } catch (e) { return true; }
+  }
   function navigate(url) {
     if (!webview) return;
     try {
@@ -272,7 +278,10 @@
       ic.textContent = hasIcon ? icon : (item.label ? item.label.charAt(0).toUpperCase() : '?');
       const lb = document.createElement('span'); lb.className = 'lb'; lb.textContent = item.label;
       btn.appendChild(ic); btn.appendChild(lb);
-      btn.addEventListener('click', () => { activeUrl = item.url; navigate(item.url); renderTabs(); });
+      btn.addEventListener('click', () => {
+        if (!isOwnSite(item.url)) { api.invoke('open-link', item.url); return; } // other website: app decides (in-app or browser)
+        activeUrl = item.url; navigate(item.url); renderTabs();
+      });
       bar.appendChild(btn);
     });
   }

@@ -23,6 +23,9 @@ const DEFAULTS = Object.freeze({
   kiosk_enabled: false,
   applock_enabled: false,
   remember_login_enabled: true,
+  external_links_in_app: false,
+  update_check_url: '',
+  build_id: '',
   crash_report_url: '',
   privacy_policy_url: '',
   nav_items: [],
@@ -79,6 +82,9 @@ function normalize(raw) {
     kiosk_enabled: asBool(r.kiosk_enabled, DEFAULTS.kiosk_enabled),
     applock_enabled: asBool(r.applock_enabled, DEFAULTS.applock_enabled),
     remember_login_enabled: asBool(r.remember_login_enabled, DEFAULTS.remember_login_enabled),
+    external_links_in_app: asBool(r.external_links_in_app, DEFAULTS.external_links_in_app),
+    update_check_url: asHttpUrl(r.update_check_url, ''),
+    build_id: typeof r.build_id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(r.build_id.trim()) ? r.build_id.trim() : '',
     crash_report_url: typeof r.crash_report_url === 'string' ? r.crash_report_url.trim() : '',
     privacy_policy_url: typeof r.privacy_policy_url === 'string' ? r.privacy_policy_url.trim() : '',
     nav_items: normalizeNavItems(r.nav_items),
@@ -126,6 +132,16 @@ function isSameSiteHost(requestedHost, actualHost) {
   return b.endsWith('.' + a) || a.endsWith('.' + b);
 }
 
+/**
+ * The app's "major domain": its host, lower-cased, without a leading www.
+ * (https://www.Shop.com/app and https://shop.com both give "shop.com").
+ * Together with the app name this is how the build site recognises an app.
+ */
+function siteDomain(url) {
+  const h = hostOf(url);
+  return h ? h.replace(/^www\./, '') : '';
+}
+
 function isHttpUrl(url) {
   try {
     const p = new URL(url).protocol;
@@ -135,4 +151,4 @@ function isHttpUrl(url) {
   }
 }
 
-module.exports = { DEFAULTS, normalize, loadConfig, hostOf, sameHost, isSameSiteHost, isHttpUrl };
+module.exports = { DEFAULTS, normalize, loadConfig, hostOf, sameHost, isSameSiteHost, isHttpUrl, siteDomain };

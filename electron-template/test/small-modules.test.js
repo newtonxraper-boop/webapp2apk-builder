@@ -112,3 +112,17 @@ test('config: normalises values and never throws on a missing file', () => {
   assert.ok(cfg.isSameSiteHost('www.example.com', 'example.com'));
   assert.ok(!cfg.isSameSiteHost('example.com', 'notexample.com'));
 });
+
+test('config: siteDomain drops www and case; update_check_url / build_id are validated', () => {
+  const { siteDomain, normalize } = require('../src/lib/config');
+  assert.strictEqual(siteDomain('https://www.Shop.com/app?x=1'), 'shop.com');
+  assert.strictEqual(siteDomain('https://shop.com'), 'shop.com');
+  assert.strictEqual(siteDomain('https://pay.shop.com'), 'pay.shop.com');
+  assert.strictEqual(siteDomain('not a url'), '');
+  const ok = normalize({ update_check_url: 'https://builder.test/update.php', build_id: 'abcdef0123456789' });
+  assert.strictEqual(ok.update_check_url, 'https://builder.test/update.php');
+  assert.strictEqual(ok.build_id, 'abcdef0123456789');
+  const bad = normalize({ update_check_url: 'javascript:alert(1)', build_id: '../../x' });
+  assert.strictEqual(bad.update_check_url, '');
+  assert.strictEqual(bad.build_id, '');
+});
