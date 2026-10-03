@@ -8,6 +8,7 @@
  * synchronously.
  */
 
+const fs = require('fs');
 const { net } = require('electron');
 const { hostOf, isSameSiteHost } = require('./config');
 
@@ -185,4 +186,73 @@ async function fetchJson(url, timeoutMs) {
   return JSON.parse(res.body.toString('utf8'));
 }
 
-module.exports = { request, makePageFetcher, makeAssetFetcher, makeQueueSender, makeProbeRequester, fetchJson };
+/**
+ * Streams a file to disk with Chromium's network stack (so system proxies and
+ * certificates work). No browser is involved, so Windows does not tag the file
+ * as "downloaded from the internet".
+ * @param {string} url
+ * @param {string} destPath
+ * @param {object} [o]
+ * @param {function} [o.onProgress]  (fraction 0..1) - only when the size is known
+ * @param {function} [o.onRedirect]  (location) => boolean; false refuses the redirect
+ * @param {number} [o.stallMs=30000] give up when no data arrives for this long
+ */
+function downloadToFile(url, destPath, o) {
+  o = o || {};
+  const stallMs = o.stallMs || 30000;
+  return new Promise((resolve, reject) => {
+    let settled = false, timer = null, out = null, req;
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) {
+        try { req.abort(); } catch (e) { /* ignore */ }
+        const cleanup = () => { try { fs.unlinkSync(destPath); } catch (e) { /* ignore */ } reject(err); };
+        if (out) { out.destroy(); setImmediate(cleanup); } else cleanup();
+      } else {
+        out.end(() => resolve());
+      }
+    };
+    const arm = () => { clearTimeout(timer); timer = setTimeout(() => finish(new Error('Download stalled')), stallMs); };
+
+    try {
+      req = net.request({ method: 'GET', url, redirect: 'manual' });
+    } catch (e) { reject(e); return; }
+    arm();
+
+    req.on('redirect', (status, method, location) => {
+      let ok = true;
+      try { ok = o.onRedirect ? !!o.onRedirect(location) : true; } catch (e) { ok = false; }
+      if (!ok) { finish(new Error('Download redirected to an untrusted address')); return; }
+      try { req.followRedirect(); } catch (e) { finish(e); }
+    });
+
+    req.on('response', (res) => {
+      if (res.statusCode !== 200) { finish(new Error('Download failed (HTTP ' + res.statusCode + ')')); return; }
+      let len = res.headers && (res.headers['content-length'] || res.headers['Content-Length']);
+      if (Array.isArray(len)) len = len[0];
+      const total = Number(len) || 0;
+      let got = 0;
+      out = fs.createWriteStream(destPath);
+      out.on('error', (e) => finish(e));
+      res.on('data', (chunk) => {
+        arm();
+        got += chunk.length;
+        if (!out.write(chunk) && typeof res.pause === 'function') {
+          res.pause();
+          out.once('drain', () => res.resume());
+        }
+        if (total && o.onProgress) { try { o.onProgress(got / total); } catch (e) { /* ignore */ } }
+      });
+      res.on('end', () => finish(null));
+      res.on('error', (e) => finish(e));
+      res.on('aborted', () => finish(new Error('Download aborted')));
+    });
+    req.on('error', (e) => finish(e));
+    req.on('abort', () => finish(new Error('Download aborted')));
+    try { req.end(); } catch (e) { finish(e); }
+  });
+}
+
+module.exports = { downloadToFile, request, makePageFetcher, makeAssetFetcher, makeQueueSender, makeProbeRequester, fetchJson };

@@ -37,6 +37,7 @@ const { AppLock } = require('./lib/applock');
 const { Notifier } = require('./lib/notifier');
 const { buildInjection } = require('./lib/page-script');
 const netutil = require('./lib/net');
+const { Updater } = require('./lib/updater');
 
 const config = loadConfig();
 const PARTITION = 'persist:webapp';
@@ -63,11 +64,14 @@ let connectivity = null;
 let vault = null;
 let applock = null;
 let notifier = null;
+let updater = null;
 
 const state = {
   queueSize: 0,
   lastSyncError: null,
   updateUrl: null,
+  updateStatus: 'idle', // 'idle' | 'downloading' | 'ready' | 'error'
+  updateProgress: 0,
   locked: false,
   view: 'live', // 'live' | 'cached' | 'offline-page'
   showingCachedFor: null,
@@ -116,6 +120,8 @@ function publicState() {
     queueSize: state.queueSize,
     lastSyncError: state.lastSyncError,
     updateUrl: state.updateUrl,
+    updateStatus: state.updateStatus,
+    updateProgress: state.updateProgress,
     locked: state.locked,
     lockSetupRequired: !!(config.applock_enabled && applock && applock.needsSetup()),
     kiosk: isKiosk(),
@@ -376,6 +382,27 @@ async function checkBuildSiteForUpdate() {
   if (!isHttpUrl(url) || hostOf(url) !== hostOf(config.update_check_url)) return;
   state.updateUrl = url;
   broadcastState();
+  startAutoUpdate({ url, sha256: info.sha256, size: info.size });
+}
+
+// Hosts the app may download an installer from on its own: the build site and
+// the app's own website (never anything else).
+function isTrustedUpdateHost(url) {
+  if (!isHttpUrl(url)) return false;
+  const h = hostOf(url);
+  return (config.update_check_url && h === hostOf(config.update_check_url))
+    || isSameSiteHost(hostOf(config.app_url), h);
+}
+
+// Downloads the newer installer inside the app (Windows + macOS only). If
+// anything goes wrong the banner still falls back to the browser download.
+function startAutoUpdate(info) {
+  if (!updater || (process.platform !== 'win32' && process.platform !== 'darwin')) return;
+  if (!isTrustedUpdateHost(info.url)) return;
+  // The same installer was already run once and this version is still being
+  // offered, so the silent install did not work - leave it to the manual link.
+  if (store.get('update_tried', '') === info.url) return;
+  updater.start(info).catch(() => {});
 }
 
 async function checkForUpdate() {
@@ -399,6 +426,7 @@ async function checkForUpdate() {
     if (latest > config.version_code) {
       state.updateUrl = String(url);
       broadcastState();
+      startAutoUpdate({ url: String(url) });
     }
   } catch (e) { /* silent, like the APK */ }
 }
@@ -711,6 +739,8 @@ function settingsSnapshot() {
     versionCode: config.version_code,
     platform: process.platform,
     updateUrl: state.updateUrl,
+    updateStatus: state.updateStatus,
+    updateProgress: state.updateProgress,
   };
 }
 
@@ -847,7 +877,17 @@ function registerIpc() {
       }
     },
     'lock-now': () => lockNow(),
-    'open-update': () => openExternalSafe(state.updateUrl),
+    'open-update': async () => {
+      if (updater && updater.status === 'ready') {
+        const ok = await updater.installNow();
+        if (ok) return true;
+      } else if (updater && updater.status === 'downloading') {
+        toast('Downloading the update - ' + Math.round(state.updateProgress * 100) + '%');
+        return true;
+      }
+      openExternalSafe(state.updateUrl); // fallback: normal browser download
+      return false;
+    },
     'open-link': (url) => navigateGuest(typeof url === 'string' ? url : ''),
     'qr-result': (res) => {
       if (!res || typeof res !== 'object') return;
@@ -1019,6 +1059,7 @@ function start() {
     if (contents.getType() === 'webview') attachGuestHandlers(contents);
   });
 
+  app.on('before-quit', () => { if (updater) updater.installOnQuit(); });
   app.on('window-all-closed', () => app.quit());
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0 && app.isReady()) createWindow(config.app_url);
@@ -1027,6 +1068,28 @@ function start() {
   app.whenReady().then(() => {
     const userData = app.getPath('userData');
     store = new Store(path.join(userData, 'settings.json'));
+    updater = new Updater({
+      platform: process.platform,
+      dir: path.join(userData, 'updates'),
+      download: (url, dest, onProgress) => netutil.downloadToFile(url, dest, {
+        onProgress,
+        onRedirect: (loc) => isTrustedUpdateHost(loc),
+      }),
+      spawn: (file, args) => {
+        const child = require('child_process').spawn(file, args, { detached: true, stdio: 'ignore' });
+        child.on('error', () => {});
+        child.unref();
+      },
+      openPath: (file) => shell.openPath(file),
+      quit: () => app.quit(),
+      onChange: () => {
+        state.updateStatus = updater.status;
+        state.updateProgress = updater.progress;
+        broadcastState();
+      },
+      onInstallLaunched: (url) => { try { store.set('update_tried', url); } catch (e) { /* ignore */ } },
+    });
+    updater.cleanup(null); // installers from a previous run are no longer needed
     setupSession();
 
     assetCache = new AssetCache({

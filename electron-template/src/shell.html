@@ -153,7 +153,7 @@
       </div>
 
       <div class="row" id="updateRow" style="display:none">
-        <div><div class="t">Update available</div><div class="s">A newer version of this app can be downloaded.</div></div>
+        <div><div class="t" id="updateTitle">Update available</div><div class="s" id="updateSub">A newer version of this app can be downloaded.</div></div>
         <button class="btn" type="button" id="updateBtn">Download</button>
       </div>
 
@@ -235,11 +235,29 @@
     } catch (e) { webview.src = url; }
   }
 
+  // ---------------------------------------------------------- update wording
+  function updateText(s) {
+    const mac = (s.platform || platform) === 'darwin';
+    const pct = Math.round((s.updateProgress || 0) * 100);
+    if (s.updateStatus === 'downloading') {
+      return { banner: 'Downloading update' + (pct ? ' - ' + pct + '%' : '...'), title: 'Downloading update',
+               sub: pct ? pct + '% - you can keep using the app.' : 'You can keep using the app.', button: 'Downloading...', busy: true };
+    }
+    if (s.updateStatus === 'ready') {
+      return mac
+        ? { banner: 'Update downloaded - click to open it', title: 'Update ready', sub: 'Open the downloaded file and drag the app into Applications.', button: 'Open', busy: false }
+        : { banner: 'Update ready - click to restart and install', title: 'Update ready', sub: 'It also installs by itself the next time you close the app.', button: 'Restart now', busy: false };
+    }
+    return { banner: 'A new version is available - click to download', title: 'Update available',
+             sub: 'A newer version of this app can be downloaded.', button: 'Download', busy: false };
+  }
+
   // ---------------------------------------------------------- state -> UI
   function applyState(s) {
     current = Object.assign(current, s);
     $('offlineBanner').classList.toggle('show', !s.online);
     $('updateBanner').classList.toggle('show', !!s.updateUrl);
+    $('updateBanner').textContent = updateText(current).banner;
     const q = s.queueSize || 0;
     $('syncBanner').classList.toggle('show', q > 0);
     $('syncText').textContent = q === 1 ? '1 item waiting to sync' : q + ' items waiting to sync';
@@ -311,6 +329,11 @@
     $('loginStatus').textContent = s.hasSavedLogin ? 'A login is saved on this computer' : 'No login saved on this computer';
     $('forgetLoginBtn').disabled = !s.hasSavedLogin;
     $('updateRow').style.display = s.updateUrl ? '' : 'none';
+    const ut = updateText(s);
+    $('updateTitle').textContent = ut.title;
+    $('updateSub').textContent = ut.sub;
+    $('updateBtn').textContent = ut.button;
+    $('updateBtn').disabled = ut.busy;
     $('versionText').textContent = 'Version ' + s.version + (s.versionCode ? ' (' + s.versionCode + ')' : '');
   }
   function openSettings() { $('settingsOverlay').classList.add('show'); refreshSettings(); }
