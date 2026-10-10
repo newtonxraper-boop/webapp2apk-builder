@@ -47,6 +47,27 @@ const { contextBridge, ipcRenderer, webFrame } = require('electron');
     return;
   }
 
+  // ---- keep pages alive: an ordinary link click opens the next page in a new
+  // background-kept view, so Back returns to the previous page exactly as it
+  // was (no reload). Anything unusual is left to the browser.
+  window.addEventListener('click', (e) => {
+    try {
+      if (e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+      if (!a || a.hasAttribute('download')) return;
+      const t = (a.getAttribute('target') || '').toLowerCase();
+      if (t && t !== '_self' && t !== '_top') return;
+      const href = a.href;
+      if (!/^https?:/i.test(href)) return;
+      const u = new URL(href);
+      const cur = new URL(window.location.href);
+      if (u.origin !== cur.origin) return;
+      if (u.href.split('#')[0] === cur.href.split('#')[0]) return; // same page / hash jump
+      e.preventDefault();
+      ipcRenderer.send('w2a:open-page', u.href);
+    } catch (err) { /* fall back to a normal navigation */ }
+  });
+
   // ---- internal bridge used by the injected page script ----------------
   expose('__w2a', {
     enqueue: (json) => ipcRenderer.invoke('w2a:enqueue', String(json)),

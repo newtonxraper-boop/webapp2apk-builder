@@ -22,13 +22,24 @@
 
   #content-wrap { flex: 1; position: relative; min-height: 0; }
   #webviewHost, #webviewHost webview { width: 100%; height: 100%; }
+  #webviewHost { position: relative; }
   #webviewHost webview { display: flex; }
+  #webviewHost webview.bg { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }
 
-  /* ---- floating share / refresh / settings buttons ---- */
+  /* ---- floating back / refresh / settings buttons ---- */
   #fab { position: absolute; right: 14px; bottom: 14px; display: flex; flex-direction: column; gap: 8px; z-index: 30; }
   #fab button { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--line); background: rgba(23,26,33,.86);
     color: var(--text); font-size: 17px; cursor: pointer; backdrop-filter: blur(6px); box-shadow: 0 4px 12px rgba(0,0,0,.35); }
-  #fab button:hover { background: var(--accent); color: #04150a; }
+  #fab button:hover:not(:disabled) { background: var(--accent); color: #04150a; }
+  #fab button:disabled { opacity: .4; cursor: default; }
+
+  #fab button.busy { border-color: var(--accent); color: var(--accent); }
+  .dl-item { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .dl-item .t { font-weight: 600; font-size: 14.5px; word-break: break-all; }
+  .dl-item .s { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .dl-bar { height: 5px; background: #2a2f3a; border-radius: 3px; margin: 6px 0; overflow: hidden; }
+  .dl-bar span { display: block; height: 100%; background: var(--accent); }
+  .dl-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
 
   /* ---- splash ---- */
   #splash { position: fixed; inset: 0; background: var(--primary); color: #fff; display: flex; align-items: center; justify-content: center;
@@ -93,7 +104,9 @@
   <div id="content-wrap">
     <div id="webviewHost"></div>
     <div id="fab">
-      <button type="button" id="shareBtn" title="Share this page">&#8599;</button>
+      <button type="button" id="backBtn" title="Back" aria-label="Back" disabled>&#8592;</button>
+      <button type="button" id="fwdBtn" title="Forward" aria-label="Forward" disabled>&#8594;</button>
+      <button type="button" id="dlBtn" title="Downloads" aria-label="Downloads" style="display:none">&#11015;</button>
       <button type="button" id="refreshBtn" title="Refresh">&#8635;</button>
       <button type="button" id="settingsBtn" title="Settings">&#9881;</button>
     </div>
@@ -132,6 +145,11 @@
         <label class="switch"><input type="checkbox" id="kioskSwitch"><span class="slider"></span></label>
       </div>
 
+      <div class="row">
+        <div><div class="t">Open when the computer starts</div><div class="s">Start this app automatically when you turn on or sign in to your computer</div></div>
+        <label class="switch"><input type="checkbox" id="loginStartSwitch"><span class="slider"></span></label>
+      </div>
+
       <div class="row" id="notifRow" style="display:none">
         <div><div class="t">Notifications</div><div class="s" id="notifSub">Allow this app to show desktop notifications</div></div>
         <label class="switch"><input type="checkbox" id="notifSwitch"><span class="slider"></span></label>
@@ -140,6 +158,11 @@
       <div class="row">
         <div><div class="t">Offline sync</div><div class="s" id="syncStatus">Up to date</div></div>
         <button class="btn" type="button" id="settingsSyncNow">Sync now</button>
+      </div>
+
+      <div class="row">
+        <div><div class="t">Offline status</div><div class="s">What is saved for offline use and what is waiting to send</div></div>
+        <button class="btn secondary" type="button" id="osOpenBtn">View</button>
       </div>
 
       <div class="row">
@@ -160,6 +183,28 @@
       <div class="row">
         <div><div class="t">About</div><div class="s" id="versionText"></div></div>
       </div>
+    </div>
+  </div>
+
+  <!-- Downloads -->
+  <div id="dlOverlay" class="overlay">
+    <div class="card">
+      <h2><span>Downloads</span><button type="button" id="dlClose" title="Close">&times;</button></h2>
+      <div id="dlList"></div>
+      <div class="row"><div class="s" id="dlEmpty">No downloads yet</div><button class="btn secondary" type="button" id="dlClear">Clear finished</button></div>
+    </div>
+  </div>
+
+  <!-- Offline status -->
+  <div id="osOverlay" class="overlay">
+    <div class="card">
+      <h2><span>Offline status</span><button type="button" id="osClose" title="Close">&times;</button></h2>
+      <div class="row"><div><div class="t">Connection</div><div class="s" id="osConn"></div></div></div>
+      <div class="row"><div><div class="t">Saved pages</div><div class="s" id="osPages"></div></div></div>
+      <div class="row"><div><div class="t">Saved images, styles and scripts</div><div class="s" id="osAssets"></div></div></div>
+      <div class="row"><div><div class="t">Last saved</div><div class="s" id="osLast"></div></div></div>
+      <div class="row"><div><div class="t">Waiting to send</div><div class="s" id="osQueue"></div></div><button class="btn" type="button" id="osSend">Send now</button></div>
+      <div class="row"><div class="s">Only pages you have opened (and the tabs) are available offline.</div><button class="btn secondary" type="button" id="osClear">Clear cache</button></div>
     </div>
   </div>
 
@@ -205,7 +250,7 @@
 (function () {
   const api = window.shellApi;
   const $ = (id) => document.getElementById(id);
-  let cfg = null, platform = '', webview = null, activeUrl = '', current = { online: true, queueSize: 0, locked: false, updateUrl: null };
+  let cfg = null, platform = '', partitionName = '', webview = null, activeUrl = '', current = { online: true, queueSize: 0, locked: false, updateUrl: null };
   let toastTimer = null;
 
   // ---------------------------------------------------------- helpers
@@ -227,6 +272,92 @@
       return a === b || b.endsWith('.' + a) || a.endsWith('.' + b);
     } catch (e) { return true; }
   }
+  // ---------------------------------------------------------- kept-alive pages
+  // Every page you open stays alive in the background (up to MAX_PAGES), so
+  // Back/Forward just switch to it - nothing reloads, scroll and forms stay put.
+  const MAX_PAGES = 8;
+  const pages = [];
+  let pos = -1;
+  function syncNav() {
+    const p = pages[pos];
+    let innerBack = false, innerFwd = false;
+    try { innerBack = !!p && p.wv.canGoBack(); } catch (_) {}
+    try { innerFwd = !!p && p.wv.canGoForward(); } catch (_) {}
+    $('backBtn').disabled = !(innerBack || pos > 0);
+    $('fwdBtn').disabled = !(innerFwd || pos < pages.length - 1);
+  }
+  function activateGuest(p) {
+    try { api.invoke('set-active-guest', p.wv.getWebContentsId()); } catch (_) { /* not attached yet - dom-ready retries */ }
+  }
+  function showPage(i) {
+    pos = i;
+    pages.forEach((p, j) => p.wv.classList.toggle('bg', j !== i));
+    const p = pages[i];
+    webview = p.wv;
+    activeUrl = p.url;
+    if (cfg && cfg.nav_items.length) renderTabs();
+    activateGuest(p);
+    syncNav();
+  }
+  function destroyPage(p) { try { p.wv.remove(); } catch (_) {} }
+  function createPage(url, first) {
+    const wv = document.createElement('webview');
+    wv.setAttribute('partition', partitionName);
+    wv.setAttribute('allowpopups', '');
+    wv.setAttribute('webpreferences', 'contextIsolation=yes,nodeIntegration=no');
+    wv.setAttribute('src', url);
+    const page = { wv, url };
+    wv.addEventListener('dom-ready', () => { if (pages[pos] === page) activateGuest(page); });
+    wv.addEventListener('did-stop-loading', () => { hideSplash(); if (pages[pos] === page) syncNav(); });
+    wv.addEventListener('did-fail-load', hideSplash);
+    const track = (e) => {
+      if (e.url && /^https?:/i.test(e.url) && (e.isMainFrame === undefined || e.isMainFrame)) {
+        page.url = e.url;
+        // signing out: forget every other kept page so nobody can go back into a logged-in screen
+        try { if (/\/(logout|signout|sign-out|log-out)(\.php)?(\/|\?|$)/i.test(new URL(e.url).pathname)) dropOtherPages(page); } catch (_) {}
+        if (pages[pos] === page) {
+          activeUrl = e.url;
+          if (cfg.nav_items.length) renderTabs();
+        }
+      }
+      if (pages[pos] === page) syncNav();
+    };
+    wv.addEventListener('did-navigate', track);
+    wv.addEventListener('did-navigate-in-page', track);
+    $('webviewHost').appendChild(wv);
+    return page;
+  }
+  function dropOtherPages(keep) {
+    for (let i = pages.length - 1; i >= 0; i--) {
+      if (pages[i] !== keep) destroyPage(pages.splice(i, 1)[0]);
+    }
+    pos = pages.indexOf(keep);
+    showPage(pos);
+  }
+  function pushPage(url, first) {
+    // anything "forward" of here is dropped, like normal history
+    while (pages.length - 1 > pos) destroyPage(pages.pop());
+    pages.push(createPage(url, first));
+    while (pages.length > MAX_PAGES) destroyPage(pages.shift());
+    showPage(pages.length - 1);
+  }
+  function navBack() {
+    const p = pages[pos];
+    if (!p) return;
+    let inner = false;
+    try { inner = p.wv.canGoBack(); } catch (_) {}
+    if (inner) { p.wv.goBack(); return; }
+    if (pos > 0) showPage(pos - 1);
+  }
+  function navForward() {
+    const p = pages[pos];
+    if (!p) return;
+    let inner = false;
+    try { inner = p.wv.canGoForward(); } catch (_) {}
+    if (inner) { p.wv.goForward(); return; }
+    if (pos < pages.length - 1) showPage(pos + 1);
+  }
+
   function navigate(url) {
     if (!webview) return;
     try {
@@ -265,6 +396,77 @@
     if ($('settingsOverlay').classList.contains('show')) refreshSettings();
   }
 
+  // ---------------------------------------------------------- downloads
+  function setupDownloads() {
+    const list = $('dlList');
+    const render = (items) => {
+      items = items || [];
+      $('dlBtn').style.display = items.length ? '' : 'none';
+      $('dlBtn').classList.toggle('busy', items.some((d) => d.state === 'progressing' || d.state === 'paused'));
+      $('dlEmpty').style.display = items.length ? 'none' : '';
+      list.textContent = '';
+      items.forEach((d) => {
+        const row = document.createElement('div');
+        row.className = 'dl-item';
+        const pct = d.total > 0 ? Math.min(100, Math.round(d.received / d.total * 100)) : 0;
+        const status = d.state === 'completed' ? 'Done \u00b7 ' + fmtBytes(d.total || d.received)
+          : d.state === 'progressing' ? (d.total > 0 ? pct + '% \u00b7 ' + fmtBytes(d.received) + ' of ' + fmtBytes(d.total) : fmtBytes(d.received))
+          : d.state === 'paused' ? 'Paused'
+          : d.state === 'cancelled' ? 'Cancelled' : 'Failed';
+        const name = document.createElement('div'); name.className = 't'; name.textContent = d.name;
+        const sub = document.createElement('div'); sub.className = 's'; sub.textContent = status;
+        row.appendChild(name); row.appendChild(sub);
+        if (d.state === 'progressing' || d.state === 'paused') {
+          const bar = document.createElement('div'); bar.className = 'dl-bar';
+          const fill = document.createElement('span'); fill.style.width = pct + '%'; bar.appendChild(fill);
+          row.appendChild(bar);
+        }
+        const acts = document.createElement('div'); acts.className = 'dl-actions';
+        const add = (label, fn, secondary) => {
+          const b = document.createElement('button'); b.type = 'button';
+          b.className = 'btn' + (secondary ? ' secondary' : ''); b.textContent = label;
+          b.addEventListener('click', fn); acts.appendChild(b);
+        };
+        if (d.state === 'completed') {
+          if (d.canOpen) add('Open', () => api.invoke('download-open', d.id));
+          add('Show in folder', () => api.invoke('download-show', d.id), true);
+        } else if (d.state === 'progressing' || d.state === 'paused') {
+          add('Cancel', () => api.invoke('download-cancel', d.id), true);
+        }
+        row.appendChild(acts);
+        list.appendChild(row);
+      });
+    };
+    api.on('shell:downloads', render);
+    api.invoke('get-downloads').then(render);
+    $('dlBtn').addEventListener('click', () => $('dlOverlay').classList.add('show'));
+    $('dlClose').addEventListener('click', () => $('dlOverlay').classList.remove('show'));
+    $('dlOverlay').addEventListener('click', (e) => { if (e.target === $('dlOverlay')) $('dlOverlay').classList.remove('show'); });
+    $('dlClear').addEventListener('click', () => api.invoke('download-clear'));
+  }
+
+  // ---------------------------------------------------------- offline status
+  function setupOfflineStatus() {
+    const load = async () => {
+      const o = await api.invoke('offline-status');
+      if (!o) return;
+      $('osConn').textContent = o.online ? 'Online' : 'Offline - showing saved pages';
+      $('osPages').textContent = o.pages + (o.pages === 1 ? ' page' : ' pages') + ' \u00b7 ' + fmtBytes(o.pageBytes) + (o.pageLimitBytes ? ' of ' + fmtBytes(o.pageLimitBytes) + ' allowed' : '');
+      $('osAssets').textContent = o.assets + (o.assets === 1 ? ' file' : ' files') + ' \u00b7 ' + fmtBytes(o.assetBytes);
+      $('osLast').textContent = o.lastCachedAt ? new Date(o.lastCachedAt).toLocaleString() : 'Nothing saved yet';
+      const q = o.queueSize || 0;
+      $('osQueue').textContent = q === 0 ? 'Nothing - all changes are sent'
+        : (q === 1 ? '1 change' : q + ' changes') + (o.lastSyncError ? ' \u00b7 ' + o.lastSyncError : '');
+      $('osSend').disabled = q === 0;
+    };
+    $('osOpenBtn').addEventListener('click', () => { closeSettings(); $('osOverlay').classList.add('show'); load(); });
+    $('osClose').addEventListener('click', () => $('osOverlay').classList.remove('show'));
+    $('osOverlay').addEventListener('click', (e) => { if (e.target === $('osOverlay')) $('osOverlay').classList.remove('show'); });
+    $('osSend').addEventListener('click', async () => { await api.invoke('sync-now'); setTimeout(load, 800); });
+    $('osClear').addEventListener('click', async () => { await api.invoke('clear-cache'); load(); });
+    api.on('shell:state', () => { if ($('osOverlay').classList.contains('show')) load(); });
+  }
+
   // ---------------------------------------------------------- splash
   function hideSplash() { $('splash').classList.add('hide'); }
 
@@ -298,7 +500,8 @@
       btn.appendChild(ic); btn.appendChild(lb);
       btn.addEventListener('click', () => {
         if (!isOwnSite(item.url)) { api.invoke('open-link', item.url); return; } // other website: app decides (in-app or browser)
-        activeUrl = item.url; navigate(item.url); renderTabs();
+        if (item.url === activeUrl) return;
+        pushPage(item.url);
       });
       bar.appendChild(btn);
     });
@@ -318,6 +521,7 @@
       : 'Require a PIN to open this app';
     $('kioskSwitch').checked = !!s.kiosk;
     $('notifSwitch').checked = !!s.notifications;
+    $('loginStartSwitch').checked = s.launchAtLogin !== false;
     $('notifSub').textContent = s.pushBuild
       ? 'Allow this app and its website to show desktop notifications'
       : 'Reminders and download alerts from this app';
@@ -351,7 +555,7 @@
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         if ($('qrOverlay').classList.contains('show')) stopQr({ error: 'cancelled' });
-        else closeSettings();
+        else { closeSettings(); $('dlOverlay').classList.remove('show'); $('osOverlay').classList.remove('show'); }
       }
     });
 
@@ -383,6 +587,7 @@
     });
 
     $('kioskSwitch').addEventListener('change', () => api.invoke('set-kiosk', $('kioskSwitch').checked));
+    $('loginStartSwitch').addEventListener('change', () => api.invoke('set-launch-at-login', $('loginStartSwitch').checked));
     $('notifSwitch').addEventListener('change', () => api.invoke('set-notifications', $('notifSwitch').checked));
     $('settingsSyncNow').addEventListener('click', () => api.invoke('sync-now'));
     $('clearCacheBtn').addEventListener('click', async () => { await api.invoke('clear-cache'); refreshSettings(); });
@@ -501,7 +706,7 @@
   // ---------------------------------------------------------- boot
   async function boot() {
     const b = await api.invoke('boot');
-    cfg = b.config; platform = b.platform;
+    cfg = b.config; platform = b.platform; partitionName = b.partition;
     document.title = cfg.app_name;
     document.documentElement.style.setProperty('--primary', cfg.primary_color);
     document.documentElement.style.setProperty('--accent', cfg.accent_color);
@@ -512,29 +717,19 @@
     let start = params.get('start') || cfg.app_url;
     activeUrl = start;
 
-    webview = document.createElement('webview');
-    webview.setAttribute('partition', b.partition);
-    webview.setAttribute('allowpopups', '');
-    webview.setAttribute('webpreferences', 'contextIsolation=yes,nodeIntegration=no');
-    webview.setAttribute('src', start);
-    $('webviewHost').appendChild(webview);
-    webview.addEventListener('did-stop-loading', hideSplash);
-    webview.addEventListener('did-fail-load', hideSplash);
-    const track = (e) => {
-      if (e.url && /^https?:/i.test(e.url) && (e.isMainFrame === undefined || e.isMainFrame)) {
-        activeUrl = e.url;
-        if (cfg.nav_items.length) renderTabs();
-      }
-    };
-    webview.addEventListener('did-navigate', track);
-    webview.addEventListener('did-navigate-in-page', track);
+    pushPage(start, true);
 
     if (cfg.nav_items.length) { $('tabbar').style.display = 'flex'; renderTabs(); }
 
     $('offlineBanner').addEventListener('click', () => api.invoke('retry'));
     $('updateBanner').addEventListener('click', () => api.invoke('open-update'));
     $('syncNowBtn').addEventListener('click', () => api.invoke('sync-now'));
-    $('shareBtn').addEventListener('click', () => api.invoke('share-current'));
+    $('backBtn').addEventListener('click', navBack);
+    $('fwdBtn').addEventListener('click', navForward);
+    api.on('shell:nav', (dir) => { if (dir === 'back') navBack(); else if (dir === 'forward') navForward(); });
+    api.on('shell:open-page', (url) => pushPage(url));
+    setupDownloads();
+    setupOfflineStatus();
     $('refreshBtn').addEventListener('click', () => api.invoke('reload'));
 
     setupSettings();

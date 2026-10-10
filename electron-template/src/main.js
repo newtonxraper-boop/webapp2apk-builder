@@ -20,7 +20,7 @@
 
 const {
   app, BrowserWindow, Menu, shell, ipcMain, session, dialog, Notification,
-  clipboard, systemPreferences, ShareMenu, powerMonitor, net, safeStorage,
+  clipboard, systemPreferences, ShareMenu, powerMonitor, net, safeStorage, webContents,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -52,7 +52,8 @@ const UPDATE_CHECK_MIN_INTERVAL_MS = 60 * 60 * 1000;
 const RELOCK_AFTER_BLUR_MS = 60 * 1000;
 
 let mainWindow = null;
-let guest = null; // the <webview>'s webContents
+let guest = null; // the ACTIVE page's <webview> webContents
+const guests = new Set(); // every live page (pages are kept alive in the background so Back/Forward don't reload)
 
 // Populated in start() once the app is ready.
 let store = null;
@@ -435,6 +436,19 @@ async function checkForUpdate() {
 // window, menu, kiosk, lock
 // ---------------------------------------------------------------------------
 
+// ----- start with the computer (Settings toggle; on by default) -----
+function launchAtLoginWanted() {
+  return store.get('launch_at_login', true) !== false;
+}
+
+function applyLaunchAtLogin() {
+  try {
+    // only register installed builds - never a dev/unpacked run
+    if (!app.isPackaged || typeof app.setLoginItemSettings !== 'function') return;
+    app.setLoginItemSettings({ openAtLogin: launchAtLoginWanted() });
+  } catch (e) { /* ignore - not supported on this system */ }
+}
+
 function applyKiosk() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const on = isKiosk();
@@ -483,8 +497,8 @@ function buildMenu() {
       label: 'View',
       submenu: [
         { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: () => attemptRealRefresh() },
-        { label: 'Back', accelerator: isMac ? 'Cmd+[' : 'Alt+Left', click: () => { if (isLive(guest) && guest.canGoBack()) guest.goBack(); } },
-        { label: 'Forward', accelerator: isMac ? 'Cmd+]' : 'Alt+Right', click: () => { if (isLive(guest) && guest.canGoForward()) guest.goForward(); } },
+        { label: 'Back', accelerator: isMac ? 'Cmd+[' : 'Alt+Left', click: () => sendShell('shell:nav', 'back') },
+        { label: 'Forward', accelerator: isMac ? 'Cmd+]' : 'Alt+Right', click: () => sendShell('shell:nav', 'forward') },
         { type: 'separator' },
         { label: 'Zoom In', accelerator: 'CmdOrCtrl+Plus', click: () => zoom(0.5) },
         { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: () => zoom(-0.5) },
@@ -572,12 +586,12 @@ function createWindow(startUrl) {
 
   // Windows "back" mouse button / media key, macOS trackpad swipe
   mainWindow.on('app-command', (e, cmd) => {
-    if (cmd === 'browser-backward' && isLive(guest) && guest.canGoBack()) guest.goBack();
-    if (cmd === 'browser-forward' && isLive(guest) && guest.canGoForward()) guest.goForward();
+    if (cmd === 'browser-backward') sendShell('shell:nav', 'back');
+    if (cmd === 'browser-forward') sendShell('shell:nav', 'forward');
   });
   mainWindow.on('swipe', (e, dir) => {
-    if (dir === 'left' && isLive(guest) && guest.canGoBack()) guest.goBack();
-    if (dir === 'right' && isLive(guest) && guest.canGoForward()) guest.goForward();
+    if (dir === 'left') sendShell('shell:nav', 'back');
+    if (dir === 'right') sendShell('shell:nav', 'forward');
   });
 
   // App lock: re-lock when minimised, or after being in the background a while.
@@ -590,6 +604,7 @@ function createWindow(startUrl) {
   mainWindow.on('focus', () => clearTimeout(blurTimer));
 
   applyKiosk();
+  applyLaunchAtLogin();
 }
 
 // ---------------------------------------------------------------------------
@@ -622,7 +637,8 @@ function onMainFrameCommitted(url) {
 
 function attachGuestHandlers(contents) {
   guest = contents;
-  contents.on('destroyed', () => { if (guest === contents) guest = null; });
+  guests.add(contents);
+  contents.on('destroyed', () => { guests.delete(contents); if (guest === contents) guest = null; });
 
   contents.setWindowOpenHandler(({ url }) => {
     if (isHttpUrl(url) && sameHost(url, config.app_url)) return { action: 'allow' };
@@ -710,8 +726,65 @@ function attachGuestHandlers(contents) {
 // IPC
 // ---------------------------------------------------------------------------
 
+// ----- download manager (list shown in the shell's Downloads panel) -----
+const MAX_TRACKED_DOWNLOADS = 30;
+const RISKY_OPEN_EXT = /\.(exe|msi|bat|cmd|com|scr|ps1|vbs|vbe|js|jse|jar|app|dmg|pkg|sh|lnk|reg|hta|command|apk)$/i;
+const downloads = [];
+const downloadItems = new Map();
+let downloadSeq = 0;
+let downloadTimer = null;
+
+function publicDownloads() {
+  return downloads.map((d) => ({
+    id: d.id, name: d.name, state: d.state, received: d.received, total: d.total,
+    startedAt: d.startedAt, canOpen: d.state === 'completed' && !RISKY_OPEN_EXT.test(d.savePath || ''),
+  }));
+}
+
+function broadcastDownloads(immediate) {
+  if (immediate) {
+    if (downloadTimer) { clearTimeout(downloadTimer); downloadTimer = null; }
+    sendShell('shell:downloads', publicDownloads());
+    return;
+  }
+  if (downloadTimer) return; // throttle progress updates
+  downloadTimer = setTimeout(() => { downloadTimer = null; sendShell('shell:downloads', publicDownloads()); }, 250);
+}
+
+function trackDownload(item) {
+  const rec = {
+    id: ++downloadSeq, name: item.getFilename(), savePath: '', state: 'progressing',
+    received: 0, total: item.getTotalBytes ? item.getTotalBytes() : 0, startedAt: Date.now(),
+  };
+  downloads.unshift(rec);
+  downloadItems.set(rec.id, item);
+  while (downloads.length > MAX_TRACKED_DOWNLOADS) {
+    const old = downloads.pop();
+    downloadItems.delete(old.id);
+  }
+  if (typeof item.on === 'function') {
+    item.on('updated', (e, st) => {
+      rec.received = item.getReceivedBytes();
+      rec.total = item.getTotalBytes();
+      try { rec.savePath = item.getSavePath() || rec.savePath; } catch (err) { /* ignore */ }
+      rec.state = st === 'interrupted' ? 'interrupted' : (item.isPaused() ? 'paused' : 'progressing');
+      broadcastDownloads(false);
+    });
+  }
+  item.once('done', (e, result) => {
+    try { rec.savePath = item.getSavePath() || rec.savePath; } catch (err) { /* ignore */ }
+    rec.state = result;
+    if (result === 'completed' && rec.total) rec.received = rec.total;
+    downloadItems.delete(rec.id);
+    broadcastDownloads(true);
+  });
+  broadcastDownloads(true);
+}
+
 function isGuestSender(sender) {
-  return isLive(guest) && !!sender && sender.id === guest.id;
+  if (!sender) return false;
+  for (const g of guests) { if (isLive(g) && g.id === sender.id) return true; }
+  return false;
 }
 
 function settingsSnapshot() {
@@ -729,6 +802,7 @@ function settingsSnapshot() {
     canTouchId: canTouchId(),
     kiosk: isKiosk(),
     notifications: notificationsAllowed(),
+    launchAtLogin: launchAtLoginWanted(),
     pushBuild: !!config.push_enabled,
     rememberLoginEnabled: !!config.remember_login_enabled,
     hasSavedLogin,
@@ -819,6 +893,62 @@ function registerIpc() {
     reload: () => attemptRealRefresh(),
     retry: () => attemptRealRefresh(),
     'sync-now': () => forceSendQueueNow(),
+    'set-active-guest': (id) => {
+      for (const g of guests) {
+        if (isLive(g) && g.id === Number(id)) { guest = g; return true; }
+      }
+      return false;
+    },
+    'go-forward': () => {
+      if (isLive(guest) && guest.canGoForward()) { guest.goForward(); return true; }
+      return false;
+    },
+    'get-downloads': () => publicDownloads(),
+    'download-show': (id) => {
+      const d = downloads.find((x) => x.id === id);
+      if (!d || !d.savePath) return false;
+      shell.showItemInFolder(d.savePath);
+      return true;
+    },
+    'download-open': async (id) => {
+      const d = downloads.find((x) => x.id === id);
+      if (!d || d.state !== 'completed' || !d.savePath) return false;
+      // never launch programs/scripts straight from a download - show them in the folder instead
+      if (RISKY_OPEN_EXT.test(d.savePath) || !fs.existsSync(d.savePath)) { shell.showItemInFolder(d.savePath); return false; }
+      return (await shell.openPath(d.savePath)) === '';
+    },
+    'download-cancel': (id) => {
+      const it = downloadItems.get(id);
+      if (it) { try { it.cancel(); } catch (e) { /* ignore */ } }
+      return true;
+    },
+    'download-clear': () => {
+      for (let i = downloads.length - 1; i >= 0; i--) {
+        if (downloads[i].state !== 'progressing' && downloads[i].state !== 'paused') downloads.splice(i, 1);
+      }
+      broadcastDownloads(true);
+      return true;
+    },
+    'offline-status': () => {
+      let c = { files: 0, bytes: 0, newest: 0 };
+      let a = { files: 0, bytes: 0, newest: 0 };
+      try { c = cache.stats(); } catch (e) { /* ignore */ }
+      try { a = assetCache.stats(); } catch (e) { /* ignore */ }
+      return {
+        online: isOnline(),
+        pages: c.files, pageBytes: c.bytes,
+        assets: a.files, assetBytes: a.bytes,
+        pageLimitBytes: cache.maxBytes || 0,
+        lastCachedAt: Math.max(c.newest || 0, a.newest || 0),
+        queueSize: state.queueSize,
+        lastSyncError: state.lastSyncError,
+      };
+    },
+    'go-back': () => {
+      // history navigation only - no reload of the current page
+      if (isLive(guest) && guest.canGoBack()) { guest.goBack(); return true; }
+      return false;
+    },
     'share-current': () => {
       let url = isLive(guest) ? guest.getURL() : '';
       if (!isHttpUrl(url)) url = state.showingCachedFor || state.lastCacheMissUrl || config.app_url;
@@ -843,6 +973,11 @@ function registerIpc() {
       applyKiosk();
       broadcastState();
       return isKiosk();
+    },
+    'set-launch-at-login': (on) => {
+      store.set('launch_at_login', !!on);
+      applyLaunchAtLogin();
+      return launchAtLoginWanted();
     },
     'set-notifications': (on) => {
       store.set('notifications', !!on);
@@ -949,6 +1084,12 @@ function registerIpc() {
   ipcMain.on('w2a:print', (event) => {
     if (isGuestSender(event.sender) && isLive(guest)) guest.print({ printBackground: true }, () => {});
   });
+  ipcMain.on('w2a:open-page', (event, url) => {
+    if (!isGuestSender(event.sender)) return;
+    url = String(url || '');
+    if (!isHttpUrl(url) || !sameHost(url, config.app_url) || isSensitiveUrl(url)) return;
+    sendShell('shell:open-page', url);
+  });
   ipcMain.on('w2a:share-text', (event, text) => {
     if (!isGuestSender(event.sender)) return;
     shareUrlOrText({ texts: [String(text)] });
@@ -1027,6 +1168,7 @@ function setupSession() {
     permission === 'media' && !!config.filecamera_enabled);
 
   ses.on('will-download', (event, item) => {
+    try { trackDownload(item); } catch (e) { /* never block a download */ }
     item.once('done', (e, result) => {
       if (result !== 'completed') return;
       if (Notification.isSupported() && notificationsAllowed()) {
