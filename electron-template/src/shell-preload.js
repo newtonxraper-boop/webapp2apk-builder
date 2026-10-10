@@ -8,7 +8,7 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
-const CHANNELS = new Set(['shell:state', 'shell:toast', 'shell:open-settings', 'shell:qr-open']);
+const CHANNELS = new Set(['shell:state', 'shell:toast', 'shell:open-settings', 'shell:qr-open', 'shell:downloads']);
 
 contextBridge.exposeInMainWorld('shellApi', {
   invoke: (name, arg) => ipcRenderer.invoke('shell:invoke', String(name), arg),

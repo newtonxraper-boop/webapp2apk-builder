@@ -49,3 +49,13 @@ New "Keep people logged in" toggle on the build form, on by default (matches the
 Either way, people can clear a saved login themselves from Settings ("Forget saved login") - shown only when the feature is on. Signing out of the site as normal also still clears it, same as before.
 
 Tests: 87 passing, including a full round-trip through the real `main.js` IPC handlers proving that nothing is written to disk while the feature is off, and that a saved login survives being re-enabled/disabled correctly.
+
+## Back / Forward, Downloads, Offline status
+
+- **Back and Forward buttons** replace the Share button in the floating buttons. Both move through page history without reloading and grey out when there is nowhere to go.
+- **Download manager**: a Downloads button appears after the first download. It lists recent downloads with live progress, *Open* (not offered for programs/scripts), *Show in folder*, *Cancel* and *Clear finished*.
+- **Offline status** (Settings > Offline status > View): connection state, saved pages and files with sizes, when something was last saved, and changes waiting to send (with *Send now* and *Clear cache*).
+
+## Open when the computer starts
+
+The app opens automatically when the computer starts or the user signs in (installed builds only). It is on by default, and Settings > *Open when the computer starts* turns it off or on again.

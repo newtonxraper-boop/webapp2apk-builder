@@ -162,7 +162,7 @@ class AssetCache {
 
   stats() {
     const files = this._listFiles();
-    return { files: files.length, bytes: files.reduce((s, f) => s + f.size, 0) };
+    return { files: files.length, bytes: files.reduce((s, f) => s + f.size, 0), newest: files.reduce((m, f) => Math.max(m, f.mtime || 0), 0) };
   }
 
   clear() {
