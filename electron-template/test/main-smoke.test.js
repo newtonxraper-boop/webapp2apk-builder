@@ -449,3 +449,24 @@ test('update check asks the build site with domain + name and only offers a down
     netBehavior = originalNet;
   }
 });
+
+test('clicking a login/sign-in link is not silently dropped: it loads in the same view', async () => {
+  const cfgPath = path.join(__dirname, '..', 'src', 'app_config.json');
+  const original = fs.readFileSync(cfgPath, 'utf8');
+  try {
+    fs.writeFileSync(cfgPath, JSON.stringify({ app_name: 'Shop', app_url: HOME, package_name: 'com.acme.shop', nav_items: [] }));
+    electronMock.app.getPath = () => tmpDir('w2a-main-loginclick-');
+    electronMock.app.removeAllListeners('web-contents-created');
+    delete require.cache[require.resolve('../src/main.js')];
+    require('../src/main.js');
+    await wait(50);
+    const guest = new WC('webview');
+    electronMock.app.emit('web-contents-created', {}, guest);
+    ipcOn['w2a:open-page']({ sender: guest }, HOME + 'prefect_portal_login.php');
+    await wait(10);
+    assert.ok(guest.loaded.some((l) => l.url === HOME + 'prefect_portal_login.php'), 'login page loads in the app');
+    ipcOn['w2a:open-page']({ sender: guest }, HOME + 'login.php');
+    await wait(10);
+    assert.ok(guest.loaded.some((l) => l.url === HOME + 'login.php'));
+  } finally { fs.writeFileSync(cfgPath, original); }
+});

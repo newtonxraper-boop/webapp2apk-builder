@@ -1122,7 +1122,16 @@ function registerIpc() {
   ipcMain.on('w2a:open-page', (event, url) => {
     if (!isGuestSender(event.sender)) return;
     url = String(url || '');
-    if (!isHttpUrl(url) || !sameHost(url, config.app_url) || isSensitiveUrl(url)) return;
+    if (!isHttpUrl(url)) return;
+    // Login / sign-up / checkout pages (and www<->apex variants) can't be kept
+    // as a background page, but the click was already cancelled by the page
+    // preload - so load them in the same view instead of silently dropping the
+    // click (that is what made the login buttons look dead).
+    if (!sameHost(url, config.app_url) || isSensitiveUrl(url)) {
+      if (isInAppUrl(url) && isLive(event.sender)) event.sender.loadURL(url).catch(() => {});
+      else openExternalSafe(url);
+      return;
+    }
     sendShell('shell:open-page', url);
   });
   ipcMain.on('w2a:share-text', (event, text) => {
