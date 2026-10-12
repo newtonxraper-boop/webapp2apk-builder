@@ -361,7 +361,20 @@ test('external_links_in_app: other websites open in the browser by default, or s
     await ipcHandlers['shell:invoke']({ sender: FakeWindow.last.webContents }, 'open-link', OTHER);
     assert.strictEqual(opened.length, 3, 'nav button for another site opens the browser');
     // the app's own site still loads inside the app
-    assert.strictEqual(guest.openHandler({ url: HOME + 'x' }).action, 'allow');
+    // target=_blank links (e.g. login/register buttons) on the app's own site load in the same view
+    assert.strictEqual(guest.openHandler({ url: HOME + 'login', disposition: 'foreground-tab' }).action, 'deny');
+    await wait(10);
+    assert.ok(guest.loaded.some((l) => l.url === HOME + 'login'), 'own-site login link loads in the app');
+    // www <-> apex bounce during login is not "another site"
+    ev = { prevented: false, preventDefault() { this.prevented = true; } };
+    guest.emit('will-navigate', ev, 'https://www.' + new URL(HOME).hostname + '/login');
+    assert.strictEqual(ev.prevented, false, 'www/apex redirect stays in the app');
+    // social/SSO login popups stay in the app
+    assert.strictEqual(guest.openHandler({ url: 'https://accounts.google.com/o/oauth2/auth?x=1', disposition: 'new-window' }).action, 'allow');
+    ev = { prevented: false, preventDefault() { this.prevented = true; } };
+    guest.emit('will-navigate', ev, 'https://accounts.google.com/signin/v2');
+    assert.strictEqual(ev.prevented, false, 'SSO page stays in the app');
+    assert.strictEqual(opened.length, 3, 'nothing login-related went to the browser');
 
     // ---- enabled: other domains stay inside the app
     opened.length = 0;

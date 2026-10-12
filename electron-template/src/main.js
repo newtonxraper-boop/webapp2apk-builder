@@ -157,6 +157,37 @@ function isAllowedTarget(url) {
   return isHttpUrl(url) && isSameSiteHost(hostOf(config.app_url), hostOf(url));
 }
 
+// Login / sign-in flows must stay inside the app: the site's own login
+// buttons often bounce through www<->apex, a login subdomain, or a social /
+// SSO provider (Google, Facebook, Apple, Microsoft, GitHub...). Sending those
+// to the default browser breaks the login (the session lives in the app).
+const AUTH_HOSTS = [
+  'accounts.google.com', 'google.com', 'facebook.com', 'appleid.apple.com',
+  'login.microsoftonline.com', 'login.live.com', 'github.com', 'twitter.com',
+  'x.com', 'linkedin.com', 'auth0.com', 'okta.com', 'firebaseapp.com',
+  'clerk.accounts.dev', 'amazoncognito.com',
+];
+const AUTH_PATH_RE = /(^|[\/_.-])(login|log-in|signin|sign-in|signup|sign-up|register|oauth2?|authorize|auth|sso|callback|account)([\/_.-]|$)/i;
+
+function isAuthUrl(url) {
+  if (!isHttpUrl(url)) return false;
+  let u;
+  try { u = new URL(url); } catch (e) { return false; }
+  const h = u.hostname.toLowerCase();
+  if (!AUTH_HOSTS.some((a) => h === a || h.endsWith('.' + a))) return false;
+  return /^(accounts|login|auth|appleid|sso|id)\./.test(h)
+    || AUTH_PATH_RE.test(u.pathname)
+    || /oauth|signin|login/i.test(u.search);
+}
+
+// True when a URL should load inside the app rather than the default browser.
+function isInAppUrl(url) {
+  if (!isHttpUrl(url)) return false;
+  return isSameSiteHost(hostOf(config.app_url), hostOf(url)) // incl. www <-> apex + subdomains
+    || isAuthUrl(url)
+    || !!config.external_links_in_app;
+}
+
 function openExternalSafe(url) {
   if (isHttpUrl(url)) shell.openExternal(url).catch(() => {});
 }
@@ -222,7 +253,7 @@ function openUrlArg(argv) {
 // other website follows the build option (inside the app, or the default browser).
 function navigateGuest(url) {
   if (!isHttpUrl(url)) return;
-  if (isAllowedTarget(url) || config.external_links_in_app) {
+  if (isInAppUrl(url)) {
     if (isLive(guest)) guest.loadURL(url).catch(() => {});
   } else {
     openExternalSafe(url);
@@ -640,11 +671,15 @@ function attachGuestHandlers(contents) {
   guests.add(contents);
   contents.on('destroyed', () => { guests.delete(contents); if (guest === contents) guest = null; });
 
-  contents.setWindowOpenHandler(({ url }) => {
-    if (isHttpUrl(url) && sameHost(url, config.app_url)) return { action: 'allow' };
-    if (config.external_links_in_app && isHttpUrl(url)) {
-      // build option: keep other websites inside the app - load them in the
-      // same view rather than opening a separate window
+  contents.setWindowOpenHandler(({ url, disposition }) => {
+    if (!isHttpUrl(url)) { openExternalSafe(url); return { action: 'deny' }; }
+    // Real popup windows (window.open with features) - e.g. "Sign in with Google" -
+    // need to stay a child window so the site can read the result back. They
+    // share the app's session, so the login lands in the app.
+    if (isAuthUrl(url) && disposition === 'new-window') return { action: 'allow' };
+    // Ordinary target="_blank" links (including login / register buttons) just
+    // load in the same view, with the same saved session.
+    if (isInAppUrl(url)) {
       if (isLive(guest)) guest.loadURL(url).catch(() => {});
       return { action: 'deny' };
     }
@@ -660,7 +695,7 @@ function attachGuestHandlers(contents) {
       if (!/^(file:|data:|about:)/i.test(url)) { e.preventDefault(); shell.openExternal(url).catch(() => {}); }
       return;
     }
-    if (!sameHost(url, config.app_url) && !config.external_links_in_app) {
+    if (!isInAppUrl(url)) {
       e.preventDefault();
       openExternalSafe(url);
     }
