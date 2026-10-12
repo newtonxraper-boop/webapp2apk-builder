@@ -1104,7 +1104,22 @@ public class MainActivity extends AppCompatActivity {
                 "    return {key:key,type:'text',value:String(value)};" +
                 "  })).then(function(list){return list.filter(function(x){return x;});});" +
                 "}" +
-                "function queueSubmission(url,method,fields,enctype){" +
+                "function w2aPickHeaders(h){" +
+                "  var out={};" +
+                "  if(!h)return out;" +
+                "  var okKeys={'content-type':1,'accept':1,'x-requested-with':1,'x-csrf-token':1,'x-xsrf-token':1,'csrf-token':1};" +
+                "  function put(k,v){" +
+                "    k=String(k).toLowerCase();" +
+                "    if(okKeys[k]&&typeof v==='string'&&v.length<512&&!/[\\r\\n]/.test(v))out[k]=v;" +
+                "  }" +
+                "  try{" +
+                "    if(typeof Headers!=='undefined'&&h instanceof Headers){h.forEach(function(v,k){put(k,v);});}" +
+                "    else if(Array.isArray(h)){h.forEach(function(p){if(p&&p.length>=2)put(p[0],p[1]);});}" +
+                "    else if(typeof h==='object'){Object.keys(h).forEach(function(k){put(k,h[k]);});}" +
+                "  }catch(e){}" +
+                "  return out;" +
+                "}" +
+                "function queueSubmission(url,method,fields,enctype,headers){" +
                 // Guards against exactly the kind of bug that produces a
                 // permanently-stuck sync item: some page code accidentally
                 // passing a stringified object ("{}", "[object Object]")
@@ -1125,7 +1140,7 @@ public class MainActivity extends AppCompatActivity {
                 "    console.warn('w2a offline queue: refusing to queue invalid url',url);" +
                 "    return false;" +
                 "  }" +
-                "  var payload=JSON.stringify({url:resolved,method:method,enctype:enctype,fields:fields,ts:Date.now()});" +
+                "  var payload=JSON.stringify({url:resolved,method:method,enctype:enctype,fields:fields,headers:w2aPickHeaders(headers),ts:Date.now()});" +
                 "  if(window.AndroidOfflineQueue&&window.AndroidOfflineQueue.enqueue){" +
                 "    window.AndroidOfflineQueue.enqueue(payload);" +
                 "    return true;" +
@@ -1192,18 +1207,18 @@ public class MainActivity extends AppCompatActivity {
                 "    form.submit();" +
                 "  }).catch(function(){form.submit();});" +
                 "},true);" +
-                "function w2aQueueBody(url,method,body,fallbackEnctype){" +
+                "function w2aQueueBody(url,method,body,fallbackEnctype,headers){" +
                 "  var p;" +
                 "  if(typeof FormData!=='undefined'&&body instanceof FormData){" +
                 "    p=serializeFormData(body).then(function(fields){" +
-                "      return queueSubmission(url,method,fields,'multipart/form-data');" +
+                "      return queueSubmission(url,method,fields,'multipart/form-data',headers);" +
                 "    });" +
                 "  }else if(typeof URLSearchParams!=='undefined'&&body instanceof URLSearchParams){" +
                 "    var fields=[];" +
                 "    body.forEach(function(value,key){fields.push({key:key,type:'text',value:String(value)});});" +
-                "    p=Promise.resolve(queueSubmission(url,method,fields,'application/x-www-form-urlencoded'));" +
+                "    p=Promise.resolve(queueSubmission(url,method,fields,'application/x-www-form-urlencoded',headers));" +
                 "  }else if(typeof body==='string'&&body.length>0){" +
-                "    p=Promise.resolve(queueSubmission(url,method,[{key:'body',type:'text',value:body}],'raw'));" +
+                "    p=Promise.resolve(queueSubmission(url,method,[{key:'body',type:'text',value:body}],'raw',headers));" +
                 "  }else{" +
                 "    p=Promise.resolve(true);" +
                 "  }" +
@@ -1239,7 +1254,8 @@ public class MainActivity extends AppCompatActivity {
                 "    else if(input&&typeof input.href==='string'){url=input.href;}" +
                 "    else if(input){url=String(input);}" +
                 "    else{url='';}" +
-                "    return w2aQueueBody(url,method,init.body,'raw').then(function(){" +
+                "    var hdrs=init.headers||((input&&typeof input==='object'&&input.headers)?input.headers:null);" +
+                "    return w2aQueueBody(url,method,init.body,'raw',hdrs).then(function(){" +
                 // Resolve as if the request succeeded, rather than rejecting the
                 // promise. The change is safely queued on-device and will really be
                 // sent the moment the connection comes back - from the page's point
@@ -1266,6 +1282,7 @@ public class MainActivity extends AppCompatActivity {
                 "    return origOpen.apply(this,arguments);" +
                 "  };" +
                 "  OrigXHR.prototype.setRequestHeader=function(name,value){" +
+                "    try{(this.__w2aHeaders=this.__w2aHeaders||{})[String(name)]=String(value);}catch(e){}" +
                 "    return origSetHeader.apply(this,arguments);" +
                 "  };" +
                 "  OrigXHR.prototype.send=function(body){" +
@@ -1273,7 +1290,7 @@ public class MainActivity extends AppCompatActivity {
                 "    var method=this.__w2aMethod||'GET';" +
                 "    if(method==='GET'||!w2aIsOffline()){return origSend.apply(this,arguments);}" +
                 "    var url=this.__w2aUrl||'';" +
-                "    w2aQueueBody(url,method,body,'raw').then(function(){" +
+                "    w2aQueueBody(url,method,body,'raw',self.__w2aHeaders).then(function(){" +
                 "      setTimeout(function(){" +
                 // Report the queued request as a normal 200 OK, not a failure - the
                 // page's existing success handling (redirects, toasts, UI updates)

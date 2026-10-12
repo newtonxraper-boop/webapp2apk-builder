@@ -192,10 +192,12 @@ public class SettingsActivity extends AppCompatActivity {
                     message = result.succeeded + " change(s) sent";
                 } else if (result.dropped > 0) {
                     message = result.dropped + " item(s) couldn't be sent and were discarded";
+                } else if (result.remaining > 0) {
+                    message = "Could not send yet: " + (result.lastErrorMessage != null ? result.lastErrorMessage : "no connection");
                 } else {
                     message = "Nothing to send right now";
                 }
-                Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
             });
         }).start());
     }
@@ -210,6 +212,8 @@ public class SettingsActivity extends AppCompatActivity {
         } else {
             statusText.setText(pending + " changes waiting to sync");
         }
+        String why = OfflineQueueSync.getLastError(this);
+        if (pending > 0 && why != null) statusText.setText(statusText.getText() + "\nLast problem: " + why);
     }
 
     private void setupClearCacheRow() {

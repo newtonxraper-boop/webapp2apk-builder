@@ -174,7 +174,7 @@ final class OfflineQueueSync {
         int dropped = 0;
         String lastError = null;
         for (String line : lines) {
-            SubmitResult result = trySubmitQueuedItem(line);
+            SubmitResult result = trySubmitQueuedItem(context, line);
             if (result.success) {
                 succeeded++;
             } else if (result.permanentFailure) {
@@ -193,9 +193,33 @@ final class OfflineQueueSync {
         synchronized (QUEUE_LOCK) {
             writeQueueLines(context, remaining);
         }
+        saveLastError(context, remaining.isEmpty() ? null : lastError);
 
         return new FlushResult(succeeded, remaining.size(), dropped, lastError);
     }
+
+    private static final String PREFS = "w2a_sync";
+
+    private static void saveLastError(Context context, String err) {
+        try {
+            android.content.SharedPreferences.Editor e = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit();
+            if (err == null) e.remove("last_error"); else e.putString("last_error", err);
+            e.apply();
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Why the last send attempt failed (null if it didn't). Shown in Settings. */
+    static String getLastError(Context context) {
+        try {
+            return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("last_error", null);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static final java.util.Set<String> REPLAY_HEADERS = new java.util.HashSet<>(java.util.Arrays.asList(
+            "content-type", "accept", "x-requested-with", "x-csrf-token", "x-xsrf-token", "csrf-token"));
 
     private static final class SubmitResult {
         final boolean success;
@@ -209,7 +233,7 @@ final class OfflineQueueSync {
         }
     }
 
-    private static SubmitResult trySubmitQueuedItem(String jsonLine) {
+    private static SubmitResult trySubmitQueuedItem(Context context, String jsonLine) {
         try {
             JSONObject obj = new JSONObject(jsonLine);
             String urlStr = obj.optString("url", "");
@@ -241,22 +265,77 @@ final class OfflineQueueSync {
             conn.setRequestMethod("GET".equalsIgnoreCase(method) ? "POST" : method); // never replay as GET
             conn.setDoOutput(true);
             conn.setConnectTimeout(15000);
-            conn.setReadTimeout(15000);
+            conn.setReadTimeout(20000);
             conn.setInstanceFollowRedirects(true);
+
+            // Look like the app's own WebView: same browser identity, same
+            // origin/referer, same login cookies. Servers (and shared-hosting
+            // firewalls) often reject the bare "Dalvik" client that Java
+            // would otherwise announce, which made queued items fail to send.
+            String ua;
+            try { ua = android.webkit.WebSettings.getDefaultUserAgent(context); }
+            catch (Exception e) { ua = "Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"; }
+            conn.setRequestProperty("User-Agent", ua);
+            try {
+                URL u = new URL(urlStr);
+                String origin = u.getProtocol() + "://" + u.getHost() + (u.getPort() > 0 ? ":" + u.getPort() : "");
+                conn.setRequestProperty("Origin", origin);
+                conn.setRequestProperty("Referer", origin + "/");
+            } catch (Exception ignored) {
+            }
+            conn.setRequestProperty("Accept", "*/*");
 
             String cookie = CookieManager.getInstance().getCookie(urlStr);
             if (cookie != null) conn.setRequestProperty("Cookie", cookie);
 
+            // Headers the page itself sent (JSON content-type, CSRF token,
+            // X-Requested-With...) - a JSON fetch() replayed without its
+            // Content-Type is unreadable to most servers.
+            String extraContentType = null;
+            JSONObject hdrs = obj.optJSONObject("headers");
+            if (hdrs != null) {
+                java.util.Iterator<String> keys = hdrs.keys();
+                while (keys.hasNext()) {
+                    String k = keys.next();
+                    String lk = k.toLowerCase();
+                    String v = hdrs.optString(k, "");
+                    if (!REPLAY_HEADERS.contains(lk) || v.isEmpty() || v.length() > 512 || v.contains("\r") || v.contains("\n")) continue;
+                    if (lk.equals("content-type")) { extraContentType = v; continue; }
+                    conn.setRequestProperty(k, v);
+                }
+            }
+
             if (hasFile || (enctype != null && enctype.toLowerCase().contains("multipart"))) {
                 submitAsMultipart(conn, fields);
             } else if ("raw".equals(enctype)) {
-                submitAsRawBody(conn, fields);
+                submitAsRawBody(conn, fields, extraContentType);
             } else {
                 submitAsUrlEncoded(conn, fields);
             }
 
             int status = conn.getResponseCode();
+            URL finalUrl = conn.getURL();
+            String snippet = "";
+            try {
+                java.io.InputStream es = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
+                if (es != null) {
+                    byte[] buf = new byte[400];
+                    int n = es.read(buf);
+                    if (n > 0) snippet = new String(buf, 0, n, "UTF-8").replaceAll("<[^>]*>", " ").replaceAll("\\s+", " ").trim();
+                    es.close();
+                }
+            } catch (Exception ignored) {
+            }
             conn.disconnect();
+            // The server bounced us to its login page: the saved session has
+            // expired, so the data was NOT stored. Keep it queued (don't count
+            // it as sent) until the person logs in again.
+            if (finalUrl != null && !finalUrl.toString().equals(urlStr)
+                    && finalUrl.getPath() != null
+                    && finalUrl.getPath().toLowerCase().matches(".*(login|signin|sign-in).*")
+                    && !urlStr.toLowerCase().matches(".*(login|signin|sign-in).*")) {
+                return new SubmitResult(false, false, "Login expired - open the app, log in again, then tap Send now");
+            }
             if (status >= 200 && status < 400) {
                 return new SubmitResult(true, false, null);
             }
@@ -266,7 +345,8 @@ final class OfflineQueueSync {
             // fresh login happens. Only the technical faults above (a
             // malformed URL, corrupt queued JSON) are treated as
             // permanent, since retrying those can never help.
-            return new SubmitResult(false, false, "HTTP " + status + " from server for " + urlStr);
+            return new SubmitResult(false, false, "HTTP " + status + " from server for " + urlStr
+                    + (snippet.isEmpty() ? "" : " - " + (snippet.length() > 160 ? snippet.substring(0, 160) : snippet)));
         } catch (Exception e) {
             String msg = e.getClass().getSimpleName();
             if (e.getMessage() != null) msg += ": " + e.getMessage();
@@ -292,7 +372,8 @@ final class OfflineQueueSync {
         }
     }
 
-    private static void submitAsRawBody(HttpURLConnection conn, JSONArray fields) throws Exception {
+    private static void submitAsRawBody(HttpURLConnection conn, JSONArray fields, String contentType) throws Exception {
+        conn.setRequestProperty("Content-Type", contentType != null ? contentType : "text/plain;charset=UTF-8");
         String body = "";
         for (int i = 0; i < fields.length(); i++) {
             JSONObject f = fields.getJSONObject(i);
