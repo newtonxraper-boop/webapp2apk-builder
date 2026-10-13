@@ -38,6 +38,8 @@ class WC extends EventEmitter {
   executeJavaScript(s) { this.js = (this.js || []).concat(s); return Promise.resolve(); }
   print() {}
   getZoomLevel() { return 0; } setZoomLevel() {}
+  paste() { this.pasted = true; } copy() { this.copied = true; } cut() { this.cutDone = true; } selectAll() { this.selectedAll = true; }
+  undo() { this.undone = true; } redo() { this.redone = true; }
 }
 WC.next = 1;
 
@@ -64,7 +66,7 @@ const electronMock = {
     setAppUserModelId() {}, setUserTasks() {}, dock: { setMenu() {} },
   }),
   BrowserWindow: FakeWindow,
-  Menu: { buildFromTemplate: (t) => t, setApplicationMenu(m) { electronMock.menu = m; } },
+  Menu: { buildFromTemplate: (t) => Object.assign(t.slice(), { popup() { electronMock.popped = t; } }), setApplicationMenu(m) { electronMock.menu = m; } },
   shell: { openExternal: async () => {}, showItemInFolder() {} },
   ipcMain: { handle: (n, fn) => { ipcHandlers[n] = fn; }, on: (n, fn) => { ipcOn[n] = fn; } },
   session: { fromPartition: (p) => (sessions[p] = sessions[p] || fakeSession()), defaultSession: fakeSession() },
@@ -469,4 +471,27 @@ test('clicking a login/sign-in link is not silently dropped: it loads in the sam
     await wait(10);
     assert.ok(guest.loaded.some((l) => l.url === HOME + 'login.php'));
   } finally { fs.writeFileSync(cfgPath, original); }
+});
+
+test('copy / paste shortcuts and the right-click menu work inside the website', () => {
+  const guest = new WC('webview');
+  electronMock.app.emit('web-contents-created', {}, guest);
+  const mac = process.platform === 'darwin';
+  const press = (key, extra) => {
+    let prevented = false;
+    guest.emit('before-input-event', { preventDefault() { prevented = true; } },
+      Object.assign({ type: 'keyDown', key, control: !mac, meta: mac, shift: false, alt: false }, extra));
+    return prevented;
+  };
+  assert.strictEqual(press('v'), true);
+  assert.strictEqual(guest.pasted, true);
+  press('c'); press('x'); press('a');
+  assert.ok(guest.copied && guest.cutDone && guest.selectedAll);
+  // plain typing is left alone
+  let prevented = false;
+  guest.emit('before-input-event', { preventDefault() { prevented = true; } }, { type: 'keyDown', key: 'v' });
+  assert.strictEqual(prevented, false);
+  // right-click in a text box does not throw
+  guest.emit('context-menu', {}, { isEditable: true, editFlags: { canPaste: true }, x: 1, y: 1 });
+  assert.ok(electronMock.popped.some((i) => i.label === 'Paste' && i.enabled));
 });

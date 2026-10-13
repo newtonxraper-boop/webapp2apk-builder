@@ -671,6 +671,59 @@ function attachGuestHandlers(contents) {
   guests.add(contents);
   contents.on('destroyed', () => { guests.delete(contents); if (guest === contents) guest = null; });
 
+  // ---- copy / paste / cut / undo / select-all inside the website ----------
+  // Electron does not give a <webview> a right-click menu, and the Edit-menu
+  // roles act on the shell window rather than on the site inside the
+  // <webview>, so copy and paste silently did nothing. Handle both here,
+  // directly on the site's own web contents.
+  contents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.isAutoRepeat) return;
+    const mod = process.platform === 'darwin' ? input.meta : input.control;
+    if (!mod || input.alt) return;
+    const key = String(input.key || '').toLowerCase();
+    let action = null;
+    if (key === 'c') action = 'copy';
+    else if (key === 'x') action = 'cut';
+    else if (key === 'v') action = input.shift ? 'pasteAndMatchStyle' : 'paste';
+    else if (key === 'a') action = 'selectAll';
+    else if (key === 'z') action = input.shift ? 'redo' : 'undo';
+    else if (key === 'y' && process.platform !== 'darwin') action = 'redo';
+    if (!action || !isLive(contents)) return;
+    event.preventDefault();
+    try { contents[action](); } catch (e) { /* ignore */ }
+  });
+
+  contents.on('context-menu', (event, params) => {
+    if (!isLive(contents)) return;
+    const f = params.editFlags || {};
+    const items = [];
+    if (params.isEditable) {
+      items.push(
+        { label: 'Undo', enabled: !!f.canUndo, click: () => contents.undo() },
+        { label: 'Redo', enabled: !!f.canRedo, click: () => contents.redo() },
+        { type: 'separator' },
+        { label: 'Cut', enabled: !!f.canCut, click: () => contents.cut() },
+        { label: 'Copy', enabled: !!f.canCopy, click: () => contents.copy() },
+        { label: 'Paste', enabled: !!f.canPaste, click: () => contents.paste() },
+        { label: 'Select All', enabled: !!f.canSelectAll, click: () => contents.selectAll() },
+      );
+    } else {
+      if (params.linkURL) {
+        items.push({ label: 'Copy Link Address', click: () => clipboard.writeText(params.linkURL) });
+      }
+      if (params.selectionText) {
+        items.push({ label: 'Copy', click: () => contents.copy() });
+      }
+      if (params.mediaType === 'image' && params.srcURL) {
+        items.push({ label: 'Copy Image', click: () => contents.copyImageAt(params.x, params.y) });
+      }
+      if (params.selectionText || items.length === 0) {
+        items.push({ label: 'Select All', click: () => contents.selectAll() });
+      }
+    }
+    if (items.length) Menu.buildFromTemplate(items).popup({ window: mainWindow || undefined });
+  });
+
   contents.setWindowOpenHandler(({ url, disposition }) => {
     if (!isHttpUrl(url)) { openExternalSafe(url); return { action: 'deny' }; }
     // Real popup windows (window.open with features) - e.g. "Sign in with Google" -
