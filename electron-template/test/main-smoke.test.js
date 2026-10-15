@@ -48,6 +48,9 @@ class FakeWindow extends EventEmitter {
   loadFile(f, o) { this.loadedShell = { f, o }; }
   setTitle() {} setKiosk(v) { this.kiosk = v; } isFullScreen() { return false; } setFullScreen() {}
   isDestroyed() { return false; } isMinimized() { return false; } focus() {} restore() {}
+  isVisible() { return this.visible !== false; } show() { this.visible = true; } hide() { this.visible = false; }
+  isMaximized() { return false; } maximize() {} isKiosk() { return false; } getBounds() { return { x: 10, y: 20, width: 900, height: 600 }; }
+  setOverlayIcon(i, d) { this.overlay = { i, d }; }
   static getAllWindows() { return [FakeWindow.last]; }
 }
 
@@ -75,6 +78,9 @@ const electronMock = {
   clipboard: { text: '', writeText(t) { this.text = t; } },
   systemPreferences: { canPromptTouchID: () => false, askForMediaAccess: async () => true },
   ShareMenu: undefined,
+  Tray: class extends EventEmitter { constructor(i) { super(); this.icon = i; electronMock.tray = this; } setToolTip(t) { this.tip = t; } setContextMenu(m) { this.menu = m; } },
+  nativeImage: { createFromPath: () => ({ isEmpty: () => false, resize() { return this; } }), createFromBuffer: (b) => ({ buf: b }) },
+  screen: { getAllDisplays: () => [{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }] },
   powerMonitor: new EventEmitter(),
   safeStorage: { isEncryptionAvailable: () => false },
   net: {
@@ -494,4 +500,35 @@ test('copy / paste shortcuts and the right-click menu work inside the website', 
   // right-click in a text box does not throw
   guest.emit('context-menu', {}, { isEditable: true, editFlags: { canPaste: true }, x: 1, y: 1 });
   assert.ok(electronMock.popped.some((i) => i.label === 'Paste' && i.enabled));
+});
+
+
+test('background mode: close hides to the tray, Tray > Quit really quits', async () => {
+  const win = FakeWindow.last;
+  assert.ok(electronMock.tray, 'tray created');
+  let prevented = false;
+  win.emit('close', { preventDefault() { prevented = true; } });
+  assert.strictEqual(prevented, true, 'close was intercepted');
+  assert.strictEqual(win.visible, false, 'window hidden');
+  // tray click brings it back
+  electronMock.tray.emit('click');
+  assert.strictEqual(win.visible, true);
+  // switching the setting off lets close through
+  await ipcHandlers['shell:invoke']({ sender: win.webContents }, 'set-run-in-background', false);
+  prevented = false;
+  win.emit('close', { preventDefault() { prevented = true; } });
+  assert.strictEqual(prevented, false);
+  await ipcHandlers['shell:invoke']({ sender: win.webContents }, 'set-run-in-background', true);
+  // a real quit (before-quit) must never be blocked
+  appEvents.emit('before-quit');
+  prevented = false;
+  win.emit('close', { preventDefault() { prevented = true; } });
+  assert.strictEqual(prevented, false, 'quit not blocked');
+});
+
+test('badge: only page views may set it; Windows overlay + tray tooltip follow', async () => {
+  const win = FakeWindow.last;
+  const guestWc = new WC('webview');
+  ipcOn['w2a:badge']({ sender: guestWc }, 5);
+  assert.strictEqual(win.overlay, undefined, 'unknown senders are ignored');
 });

@@ -66,3 +66,10 @@ Opening a link (or a bottom tab) opens the next page in its own view while the p
 - Pages that change themselves in place (a form submit, or a button that sets `location.href`) use normal browser history, so going back from those can still reload.
 - Opening a new page after going back drops the pages "forward" of it, like normal history. Signing out (a /logout address) drops every kept page.
 - Login, checkout, payment and cart pages are never opened this way.
+
+
+## Tray, background mode, window memory and badge
+
+- **Tray / background mode** - closing the window hides the app in the system tray (tray menu: Open, Quit) so reminders, notifications and offline sync keep running. Turn off in Settings > "Keep running in the background". When started by "Open when the computer starts" it goes straight to the tray. If the system has no tray, closing quits as before.
+- **Window memory** - size, position and maximised state are saved and restored (a position on a disconnected monitor is ignored).
+- **Badge** - the site calls `DesktopApp.setBadge(n)` (and `DesktopApp.clearBadge()`): Windows taskbar overlay, macOS dock badge, Linux launcher count. `0` clears it. Example: `window.DesktopApp && DesktopApp.setBadge(unreadCount)`.

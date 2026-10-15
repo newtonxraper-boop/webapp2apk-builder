@@ -21,12 +21,15 @@
 const {
   app, BrowserWindow, Menu, shell, ipcMain, session, dialog, Notification,
   clipboard, systemPreferences, ShareMenu, powerMonitor, net, safeStorage, webContents,
+  Tray, nativeImage, screen,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const { loadConfig, hostOf, sameHost, isSameSiteHost, isHttpUrl, siteDomain } = require('./lib/config');
 const { Store } = require('./lib/store');
+const { restoreBounds, trackWindow } = require('./lib/window-state');
+const { normalizeCount, badgeLabel, badgePng } = require('./lib/badge');
 const { PageCache, isSensitiveUrl } = require('./lib/offline-cache');
 const { AssetCache } = require('./lib/asset-cache');
 const { OfflineQueue } = require('./lib/offline-queue');
@@ -52,6 +55,10 @@ const UPDATE_CHECK_MIN_INTERVAL_MS = 60 * 60 * 1000;
 const RELOCK_AFTER_BLUR_MS = 60 * 1000;
 
 let mainWindow = null;
+let tray = null;
+let isQuitting = false; // true once the app is really quitting (Tray > Quit, Cmd+Q, update install...)
+let badgeCount = 0;
+const startedHidden = process.argv.includes('--hidden'); // launched by 'Open when the computer starts'
 let guest = null; // the ACTIVE page's <webview> webContents
 const guests = new Set(); // every live page (pages are kept alive in the background so Back/Forward don't reload)
 
@@ -467,6 +474,84 @@ async function checkForUpdate() {
 // window, menu, kiosk, lock
 // ---------------------------------------------------------------------------
 
+// ----- tray + background mode ---------------------------------------------
+// Closing the window hides it to the system tray instead of quitting, so the
+// website's reminders, notifications and offline-queue sync keep running.
+// Only Tray > Quit (or Cmd+Q / File > Quit) really exits.
+function runInBackgroundWanted() {
+  return store.get('run_in_background', true) !== false;
+}
+
+function backgroundActive() {
+  return !!tray && !isQuitting && runInBackgroundWanted();
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (app.isReady()) createWindow(config.app_url);
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+function quitForReal() {
+  isQuitting = true;
+  app.quit();
+}
+
+function updateTrayTooltip() {
+  if (!tray) return;
+  try {
+    tray.setToolTip(badgeCount > 0 ? config.app_name + ' - ' + badgeLabel(badgeCount) + ' new' : config.app_name);
+  } catch (e) { /* cosmetic */ }
+}
+
+function createTray() {
+  if (tray || !Tray || !nativeImage) return;
+  try {
+    let img = nativeImage.createFromPath(path.join(__dirname, 'icon.png'));
+    if (img && !img.isEmpty()) img = img.resize({ width: process.platform === 'darwin' ? 18 : 16, height: process.platform === 'darwin' ? 18 : 16 });
+    tray = new Tray(img);
+    updateTrayTooltip();
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: 'Open ' + config.app_name, click: showMainWindow },
+      { type: 'separator' },
+      { label: 'Quit', click: quitForReal },
+    ]));
+    // Windows / Linux: a single click on the icon opens the app (macOS uses the menu).
+    tray.on('click', showMainWindow);
+  } catch (e) {
+    tray = null; // no tray on this system (e.g. a Linux desktop without one) - closing then quits as before
+  }
+}
+
+// ----- taskbar / dock badge: DesktopApp.setBadge(n) ------------------------
+function applyBadge() {
+  const n = badgeCount;
+  try {
+    if (process.platform === 'darwin') {
+      if (app.dock && app.dock.setBadge) app.dock.setBadge(badgeLabel(n));
+    } else if (process.platform === 'win32') {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const png = badgePng(n);
+        mainWindow.setOverlayIcon(png ? nativeImage.createFromBuffer(png) : null, png ? badgeLabel(n) + ' new' : '');
+      }
+    } else if (typeof app.setBadgeCount === 'function') {
+      app.setBadgeCount(n);
+    }
+  } catch (e) { /* cosmetic - never break the page over a badge */ }
+  updateTrayTooltip();
+}
+
+function setBadge(n) {
+  const next = normalizeCount(n);
+  if (next === badgeCount) return;
+  badgeCount = next;
+  applyBadge();
+}
+
 // ----- start with the computer (Settings toggle; on by default) -----
 function launchAtLoginWanted() {
   return store.get('launch_at_login', true) !== false;
@@ -476,7 +561,8 @@ function applyLaunchAtLogin() {
   try {
     // only register installed builds - never a dev/unpacked run
     if (!app.isPackaged || typeof app.setLoginItemSettings !== 'function') return;
-    app.setLoginItemSettings({ openAtLogin: launchAtLoginWanted() });
+    // --hidden: when started by the system at sign-in, go straight to the tray
+    app.setLoginItemSettings({ openAtLogin: launchAtLoginWanted(), args: ['--hidden'] });
   } catch (e) { /* ignore - not supported on this system */ }
 }
 
@@ -569,9 +655,16 @@ function setupShortcuts() {
 }
 
 function createWindow(startUrl) {
+  let saved = restoreBounds(null);
+  try {
+    saved = restoreBounds(store.get('window_bounds', null), screen.getAllDisplays().map((d) => d.workArea));
+  } catch (e) { /* first run / no screen info - use the defaults */ }
+  const hiddenStart = startedHidden && !!tray && runInBackgroundWanted() && !isKiosk();
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: saved.width,
+    height: saved.height,
+    ...(saved.x !== undefined ? { x: saved.x, y: saved.y } : {}),
+    show: !hiddenStart,
     minWidth: 480,
     minHeight: 360,
     backgroundColor: config.primary_color || '#0f1115',
@@ -583,6 +676,7 @@ function createWindow(startUrl) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false, // the <webview> tag needs this off
+      backgroundThrottling: false, // keep timers (reminders, sync) running while hidden in the tray
       webviewTag: true,
       spellcheck: false,
     },
@@ -601,6 +695,7 @@ function createWindow(startUrl) {
     webPreferences.contextIsolation = true;
     webPreferences.webSecurity = true;
     webPreferences.allowRunningInsecureContent = false;
+    webPreferences.backgroundThrottling = false;
     params.partition = PARTITION;
   });
 
@@ -609,6 +704,20 @@ function createWindow(startUrl) {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'shell.html'), { query: { start: startUrl } });
+
+  // remember size / position / maximised between runs
+  if (saved.maximized && !isKiosk()) { try { mainWindow.maximize(); } catch (e) { /* ignore */ } }
+  trackWindow(mainWindow, store, 'window_bounds');
+
+  // Close button = hide to the tray (background mode) instead of quitting.
+  mainWindow.on('close', (e) => {
+    if (!backgroundActive() || isKiosk()) return;
+    e.preventDefault();
+    mainWindow.hide();
+    lockNow();
+  });
+
+  mainWindow.on('session-end', () => { isQuitting = true; }); // Windows sign-out / shutdown must not be blocked by hide-to-tray
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -636,6 +745,7 @@ function createWindow(startUrl) {
 
   applyKiosk();
   applyLaunchAtLogin();
+  applyBadge(); // the Windows overlay belongs to the window, so re-apply on a new one
 }
 
 // ---------------------------------------------------------------------------
@@ -891,6 +1001,8 @@ function settingsSnapshot() {
     kiosk: isKiosk(),
     notifications: notificationsAllowed(),
     launchAtLogin: launchAtLoginWanted(),
+    runInBackground: runInBackgroundWanted(),
+    trayAvailable: !!tray,
     pushBuild: !!config.push_enabled,
     rememberLoginEnabled: !!config.remember_login_enabled,
     hasSavedLogin,
@@ -1067,6 +1179,10 @@ function registerIpc() {
       applyLaunchAtLogin();
       return launchAtLoginWanted();
     },
+    'set-run-in-background': (on) => {
+      store.set('run_in_background', !!on);
+      return runInBackgroundWanted();
+    },
     'set-notifications': (on) => {
       store.set('notifications', !!on);
       return notificationsAllowed();
@@ -1187,6 +1303,10 @@ function registerIpc() {
     }
     sendShell('shell:open-page', url);
   });
+  ipcMain.on('w2a:badge', (event, n) => {
+    if (!isGuestSender(event.sender)) return;
+    setBadge(n);
+  });
   ipcMain.on('w2a:share-text', (event, text) => {
     if (!isGuestSender(event.sender)) return;
     shareUrlOrText({ texts: [String(text)] });
@@ -1286,10 +1406,7 @@ function start() {
   if (process.platform === 'win32') app.setAppUserModelId(config.package_name);
 
   app.on('second-instance', (event, argv) => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    showMainWindow(); // also brings the app back from the tray
     const url = openUrlArg(argv);
     if (url) navigateGuest(url);
   });
@@ -1298,10 +1415,13 @@ function start() {
     if (contents.getType() === 'webview') attachGuestHandlers(contents);
   });
 
-  app.on('before-quit', () => { if (updater) updater.installOnQuit(); });
-  app.on('window-all-closed', () => app.quit());
+  app.on('before-quit', () => {
+    isQuitting = true; // let the window actually close this time
+    if (updater) updater.installOnQuit();
+  });
+  app.on('window-all-closed', () => { if (!backgroundActive()) app.quit(); });
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0 && app.isReady()) createWindow(config.app_url);
+    if (app.isReady()) showMainWindow(); // dock icon click on macOS
   });
 
   app.whenReady().then(() => {
@@ -1320,7 +1440,7 @@ function start() {
         child.unref();
       },
       openPath: (file) => shell.openPath(file),
-      quit: () => app.quit(),
+      quit: () => quitForReal(),
       onChange: () => {
         state.updateStatus = updater.status;
         state.updateProgress = updater.progress;
@@ -1353,12 +1473,7 @@ function start() {
     notifier = new Notifier(store, (title, body) => {
       if (!Notification.isSupported()) return;
       const n = new Notification({ title: title || config.app_name, body });
-      n.on('click', () => {
-        if (mainWindow) {
-          if (mainWindow.isMinimized()) mainWindow.restore();
-          mainWindow.focus();
-        }
-      });
+      n.on('click', showMainWindow);
       n.show();
     });
 
@@ -1391,6 +1506,7 @@ function start() {
     setupShortcuts();
     notifier.restore();
 
+    createTray();
     createWindow(openUrlArg(process.argv) || config.app_url);
 
     powerMonitor.on('lock-screen', lockNow);

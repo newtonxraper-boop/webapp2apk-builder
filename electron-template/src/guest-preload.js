@@ -89,6 +89,8 @@ const { contextBridge, ipcRenderer, webFrame } = require('electron');
   const cancelNotification = (id) => ipcRenderer.send('w2a:notify-cancel', Number(id) || 0);
   const scanQR = () => ipcRenderer.send('w2a:qr-scan');
   const printPage = () => ipcRenderer.send('w2a:print');
+  // Taskbar (Windows) / dock (macOS) badge. 0, null or invalid clears it.
+  const setBadge = (n) => ipcRenderer.send('w2a:badge', Number(n) || 0);
 
   expose('DesktopApp', {
     isDesktop: true,
@@ -98,6 +100,8 @@ const { contextBridge, ipcRenderer, webFrame } = require('electron');
     notify: { schedule: scheduleNotification, cancel: cancelNotification },
     scanQR,
     print: printPage,
+    setBadge,
+    clearBadge: () => setBadge(0),
     isOnline: () => online,
   });
   expose('AndroidShare', { shareText, shareFileBase64 });
