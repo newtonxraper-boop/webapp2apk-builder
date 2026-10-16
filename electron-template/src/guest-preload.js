@@ -34,6 +34,13 @@ const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
   let online = !!boot.online;
   ipcRenderer.on('w2a:online', (_e, value) => { online = !!value; });
+  let slow = !!boot.slow;
+  let saver = !!boot.saver;
+  ipcRenderer.on('w2a:net', (_e, v) => {
+    slow = !!(v && v.slow); saver = !!(v && v.saver);
+    // plain-string detail so it crosses into the page's world safely
+    try { window.dispatchEvent(new CustomEvent('desktopapp-network', { detail: JSON.stringify({ slow, dataSaver: saver }) })); } catch (e) { /* ignore */ }
+  });
 
   const expose = (name, api) => {
     try { contextBridge.exposeInMainWorld(name, api); } catch (e) { /* already defined */ }
@@ -89,6 +96,8 @@ const { contextBridge, ipcRenderer, webFrame } = require('electron');
   const cancelNotification = (id) => ipcRenderer.send('w2a:notify-cancel', Number(id) || 0);
   const scanQR = () => ipcRenderer.send('w2a:qr-scan');
   const printPage = () => ipcRenderer.send('w2a:print');
+  // Taskbar (Windows) / dock (macOS) badge. 0, null or invalid clears it.
+  const setBadge = (n) => ipcRenderer.send('w2a:badge', Number(n) || 0);
 
   expose('DesktopApp', {
     isDesktop: true,
@@ -98,7 +107,11 @@ const { contextBridge, ipcRenderer, webFrame } = require('electron');
     notify: { schedule: scheduleNotification, cancel: cancelNotification },
     scanQR,
     print: printPage,
+    setBadge,
+    clearBadge: () => setBadge(0),
     isOnline: () => online,
+    isSlow: () => slow,
+    dataSaver: () => saver,
   });
   expose('AndroidShare', { shareText, shareFileBase64 });
   expose('AndroidPrint', { printPage });

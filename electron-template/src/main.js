@@ -21,12 +21,18 @@
 const {
   app, BrowserWindow, Menu, shell, ipcMain, session, dialog, Notification,
   clipboard, systemPreferences, ShareMenu, powerMonitor, net, safeStorage, webContents,
+  Tray, nativeImage, screen,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const { loadConfig, hostOf, sameHost, isSameSiteHost, isHttpUrl, siteDomain } = require('./lib/config');
 const { Store } = require('./lib/store');
+const { restoreBounds, trackWindow } = require('./lib/window-state');
+const { normalizeCount, badgeLabel, badgePng } = require('./lib/badge');
+const { NetQuality } = require('./lib/netquality');
+const { shouldBlockRequest, shouldBlockByHeaders } = require('./lib/datasaver');
+const { UsageTracker } = require('./lib/usage');
 const { PageCache, isSensitiveUrl } = require('./lib/offline-cache');
 const { AssetCache } = require('./lib/asset-cache');
 const { OfflineQueue } = require('./lib/offline-queue');
@@ -52,6 +58,10 @@ const UPDATE_CHECK_MIN_INTERVAL_MS = 60 * 60 * 1000;
 const RELOCK_AFTER_BLUR_MS = 60 * 1000;
 
 let mainWindow = null;
+let tray = null;
+let isQuitting = false; // true once the app is really quitting (Tray > Quit, Cmd+Q, update install...)
+let badgeCount = 0;
+const startedHidden = process.argv.includes('--hidden'); // launched by 'Open when the computer starts'
 let guest = null; // the ACTIVE page's <webview> webContents
 const guests = new Set(); // every live page (pages are kept alive in the background so Back/Forward don't reload)
 
@@ -66,6 +76,8 @@ let vault = null;
 let applock = null;
 let notifier = null;
 let updater = null;
+let netQuality = null;
+let usage = null;
 
 const state = {
   queueSize: 0,
@@ -111,6 +123,30 @@ function isKiosk() {
   return store.has('kiosk_override') ? !!store.get('kiosk_override') : !!config.kiosk_enabled;
 }
 
+// ----- data saver: 'off' | 'auto' (on while the connection is slow) | 'on' -----
+function dataSaverMode() {
+  const m = store.get('data_saver', 'auto');
+  return m === 'on' || m === 'off' ? m : 'auto';
+}
+
+function dataSaverActive() {
+  if (!store) return false;
+  const m = dataSaverMode();
+  return m === 'on' || (m === 'auto' && !!(netQuality && netQuality.slow));
+}
+
+// Tell every open page (so the site can adapt: DesktopApp.isSlow / dataSaver).
+function broadcastNetToGuests() {
+  const payload = { slow: !!(netQuality && netQuality.slow), saver: dataSaverActive() };
+  for (const g of guests) { if (isLive(g)) { try { g.send('w2a:net', payload); } catch (e) { /* ignore */ } } }
+}
+
+function onNetQualityChange() {
+  try { store.set('last_net_slow', !!netQuality.slow); } catch (e) { /* ignore */ }
+  broadcastState();
+  broadcastNetToGuests();
+}
+
 function notificationsAllowed() {
   return store.get('notifications', true) !== false;
 }
@@ -126,6 +162,8 @@ function publicState() {
     locked: state.locked,
     lockSetupRequired: !!(config.applock_enabled && applock && applock.needsSetup()),
     kiosk: isKiosk(),
+    slow: !!(netQuality && netQuality.slow),
+    dataSaver: dataSaverActive(),
   };
 }
 
@@ -383,13 +421,21 @@ function cachePageInBackground(url) {
 }
 
 async function prefetchNavTabs() {
-  if (!cache || !isOnline()) return;
+  if (!cache || !isOnline() || dataSaverActive()) return; // never spend data on guesses while saving
+  const slow = !!(netQuality && netQuality.slow);
   const home = new URL(config.app_url).href;
-  const urls = config.nav_items.map((i) => i.url).filter((u) => u !== home && cache.isCacheable(u));
-  // two at a time, like the APK's 2-thread prefetch pool
-  for (let i = 0; i < urls.length; i += 2) {
-    if (!isOnline()) return;
-    await Promise.all(urls.slice(i, i + 2).map((u) => cache.fetchAndCache(u).catch(() => {})));
+  const ok = (u) => u !== home && cache.isCacheable(u) && sameHost(u, config.app_url);
+  // Smart order: the pages this person opens most come first, then the nav tabs.
+  const favourites = usage ? usage.top(slow ? 2 : 5, ok) : [];
+  const urls = [];
+  for (const u of favourites.concat(config.nav_items.map((i) => i.url))) {
+    if (ok(u) && !urls.includes(u)) urls.push(u);
+  }
+  const batch = slow ? 1 : 2; // two at a time (like the APK's pool), one on a slow link
+  const list = slow ? urls.slice(0, 4) : urls;
+  for (let i = 0; i < list.length; i += batch) {
+    if (!isOnline() || dataSaverActive()) return;
+    await Promise.all(list.slice(i, i + batch).map((u) => cache.fetchAndCache(u).catch(() => {})));
   }
 }
 
@@ -467,6 +513,84 @@ async function checkForUpdate() {
 // window, menu, kiosk, lock
 // ---------------------------------------------------------------------------
 
+// ----- tray + background mode ---------------------------------------------
+// Closing the window hides it to the system tray instead of quitting, so the
+// website's reminders, notifications and offline-queue sync keep running.
+// Only Tray > Quit (or Cmd+Q / File > Quit) really exits.
+function runInBackgroundWanted() {
+  return store.get('run_in_background', true) !== false;
+}
+
+function backgroundActive() {
+  return !!tray && !isQuitting && runInBackgroundWanted();
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (app.isReady()) createWindow(config.app_url);
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+function quitForReal() {
+  isQuitting = true;
+  app.quit();
+}
+
+function updateTrayTooltip() {
+  if (!tray) return;
+  try {
+    tray.setToolTip(badgeCount > 0 ? config.app_name + ' - ' + badgeLabel(badgeCount) + ' new' : config.app_name);
+  } catch (e) { /* cosmetic */ }
+}
+
+function createTray() {
+  if (tray || !Tray || !nativeImage) return;
+  try {
+    let img = nativeImage.createFromPath(path.join(__dirname, 'icon.png'));
+    if (img && !img.isEmpty()) img = img.resize({ width: process.platform === 'darwin' ? 18 : 16, height: process.platform === 'darwin' ? 18 : 16 });
+    tray = new Tray(img);
+    updateTrayTooltip();
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: 'Open ' + config.app_name, click: showMainWindow },
+      { type: 'separator' },
+      { label: 'Quit', click: quitForReal },
+    ]));
+    // Windows / Linux: a single click on the icon opens the app (macOS uses the menu).
+    tray.on('click', showMainWindow);
+  } catch (e) {
+    tray = null; // no tray on this system (e.g. a Linux desktop without one) - closing then quits as before
+  }
+}
+
+// ----- taskbar / dock badge: DesktopApp.setBadge(n) ------------------------
+function applyBadge() {
+  const n = badgeCount;
+  try {
+    if (process.platform === 'darwin') {
+      if (app.dock && app.dock.setBadge) app.dock.setBadge(badgeLabel(n));
+    } else if (process.platform === 'win32') {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const png = badgePng(n);
+        mainWindow.setOverlayIcon(png ? nativeImage.createFromBuffer(png) : null, png ? badgeLabel(n) + ' new' : '');
+      }
+    } else if (typeof app.setBadgeCount === 'function') {
+      app.setBadgeCount(n);
+    }
+  } catch (e) { /* cosmetic - never break the page over a badge */ }
+  updateTrayTooltip();
+}
+
+function setBadge(n) {
+  const next = normalizeCount(n);
+  if (next === badgeCount) return;
+  badgeCount = next;
+  applyBadge();
+}
+
 // ----- start with the computer (Settings toggle; on by default) -----
 function launchAtLoginWanted() {
   return store.get('launch_at_login', true) !== false;
@@ -476,7 +600,8 @@ function applyLaunchAtLogin() {
   try {
     // only register installed builds - never a dev/unpacked run
     if (!app.isPackaged || typeof app.setLoginItemSettings !== 'function') return;
-    app.setLoginItemSettings({ openAtLogin: launchAtLoginWanted() });
+    // --hidden: when started by the system at sign-in, go straight to the tray
+    app.setLoginItemSettings({ openAtLogin: launchAtLoginWanted(), args: ['--hidden'] });
   } catch (e) { /* ignore - not supported on this system */ }
 }
 
@@ -569,20 +694,33 @@ function setupShortcuts() {
 }
 
 function createWindow(startUrl) {
+  let saved = restoreBounds(null);
+  try {
+    saved = restoreBounds(store.get('window_bounds', null), screen.getAllDisplays().map((d) => d.workArea));
+  } catch (e) { /* first run / no screen info - use the defaults */ }
+  const hiddenStart = startedHidden && !!tray && runInBackgroundWanted() && !isKiosk();
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: saved.width,
+    height: saved.height,
+    ...(saved.x !== undefined ? { x: saved.x, y: saved.y } : {}),
+    show: !hiddenStart,
     minWidth: 480,
     minHeight: 360,
     backgroundColor: config.primary_color || '#0f1115',
     title: config.app_name,
     icon: path.join(__dirname, 'icon.png'),
     autoHideMenuBar: true,
+    // Branded title bar drawn by shell.html; Windows/Linux keep their native
+    // minimise / maximise / close buttons (tinted), macOS keeps its traffic lights.
+    ...(process.platform === 'darwin'
+      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 14, y: 12 } }
+      : { titleBarStyle: 'hidden', titleBarOverlay: { color: '#12151b', symbolColor: '#e8eaed', height: 38 } }),
     webPreferences: {
       preload: SHELL_PRELOAD,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false, // the <webview> tag needs this off
+      backgroundThrottling: false, // keep timers (reminders, sync) running while hidden in the tray
       webviewTag: true,
       spellcheck: false,
     },
@@ -601,6 +739,7 @@ function createWindow(startUrl) {
     webPreferences.contextIsolation = true;
     webPreferences.webSecurity = true;
     webPreferences.allowRunningInsecureContent = false;
+    webPreferences.backgroundThrottling = false;
     params.partition = PARTITION;
   });
 
@@ -609,6 +748,20 @@ function createWindow(startUrl) {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'shell.html'), { query: { start: startUrl } });
+
+  // remember size / position / maximised between runs
+  if (saved.maximized && !isKiosk()) { try { mainWindow.maximize(); } catch (e) { /* ignore */ } }
+  trackWindow(mainWindow, store, 'window_bounds');
+
+  // Close button = hide to the tray (background mode) instead of quitting.
+  mainWindow.on('close', (e) => {
+    if (!backgroundActive() || isKiosk()) return;
+    e.preventDefault();
+    mainWindow.hide();
+    lockNow();
+  });
+
+  mainWindow.on('session-end', () => { isQuitting = true; }); // Windows sign-out / shutdown must not be blocked by hide-to-tray
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -636,6 +789,7 @@ function createWindow(startUrl) {
 
   applyKiosk();
   applyLaunchAtLogin();
+  applyBadge(); // the Windows overlay belongs to the window, so re-apply on a new one
 }
 
 // ---------------------------------------------------------------------------
@@ -664,6 +818,9 @@ function onMainFrameCommitted(url) {
     state.pendingCredentials = null;
   }
   state.lastPageUrl = url;
+  try {
+    if (usage && isHttpUrl(url) && sameHost(url, config.app_url) && !isSensitiveUrl(url)) usage.record(url);
+  } catch (e) { /* ignore */ }
 }
 
 function attachGuestHandlers(contents) {
@@ -794,11 +951,58 @@ function attachGuestHandlers(contents) {
     // Chromium's own error page in place).
   });
 
+  // ---- faster start: if the live site is slow to answer on launch, show the
+  // saved copy of the page straight away, then switch to the live one.
+  let loadStartedAt = 0;
+  contents.on('did-start-loading', () => {
+    loadStartedAt = Date.now();
+    if (state.startupDone || state.startupTimer) return;
+    const wait = store && store.get('last_net_slow', false) ? 1200 : 3000;
+    state.startupTimer = setTimeout(() => {
+      state.startupTimer = null;
+      if (state.startupDone || !isLive(contents)) return;
+      state.startupDone = true;
+      const url = config.app_url;
+      const entry = cache ? cache.read(url) : null;
+      if (!entry) return;
+      state.startupSnapshot = true;
+      showOfflineFallback(contents, url).then(() => {
+        toast('Showing saved page - loading the latest...');
+        if (!isOnline()) return;
+        cache.fetchAndCache(url)
+          .catch(() => {})
+          .then(() => {
+            if (state.startupSnapshot && isLive(contents) && state.showingCachedFor === url) {
+              state.startupSnapshot = false;
+              contents.loadURL(url).catch(() => {});
+            }
+          });
+      });
+    }, wait);
+    if (state.startupTimer.unref) state.startupTimer.unref();
+  });
+  contents.on('dom-ready', () => {
+    const u = contents.getURL();
+    if (isHttpUrl(u)) {
+      state.startupDone = true;
+      clearTimeout(state.startupTimer);
+      state.startupTimer = null;
+      state.startupSnapshot = false;
+    }
+  });
+  contents.on('did-stop-loading', () => {
+    const u = contents.getURL();
+    if (loadStartedAt && netQuality && isHttpUrl(u) && sameHost(u, config.app_url) && state.view === 'live') {
+      netQuality.record('load', Date.now() - loadStartedAt);
+    }
+    loadStartedAt = 0;
+  });
+
   contents.on('did-frame-finish-load', (e, isMainFrame) => {
     if (!isMainFrame) return;
     const url = contents.getURL();
     if (!url || url.startsWith('data:') || url.startsWith('file:')) return;
-    if (!state.prefetchDone && isOnline() && sameHost(url, config.app_url)) {
+    if (!state.prefetchDone && isOnline() && !dataSaverActive() && sameHost(url, config.app_url)) {
       state.prefetchDone = true;
       prefetchNavTabs();
     }
@@ -825,7 +1029,7 @@ let downloadTimer = null;
 function publicDownloads() {
   return downloads.map((d) => ({
     id: d.id, name: d.name, state: d.state, received: d.received, total: d.total,
-    startedAt: d.startedAt, canOpen: d.state === 'completed' && !RISKY_OPEN_EXT.test(d.savePath || ''),
+    startedAt: d.startedAt, canResume: !!d.canResume && !!downloadItems.get(d.id), canOpen: d.state === 'completed' && !RISKY_OPEN_EXT.test(d.savePath || ''),
   }));
 }
 
@@ -839,10 +1043,56 @@ function broadcastDownloads(immediate) {
   downloadTimer = setTimeout(() => { downloadTimer = null; sendShell('shell:downloads', publicDownloads()); }, 250);
 }
 
+// A dropped connection must not lose a half-finished download: keep trying to
+// pick it up from the same byte (Chromium's HTTP range resume), with growing
+// pauses, and again straight away when the network comes back.
+const MAX_DOWNLOAD_RETRIES = 12;
+
+function tryResume(rec, item) {
+  try {
+    if (item && item.canResume()) {
+      rec.state = 'progressing';
+      item.resume();
+      return true;
+    }
+  } catch (e) { /* ignore */ }
+  return false;
+}
+
+function scheduleDownloadResume(rec, item) {
+  if (rec.resumeTimer || rec.retries >= MAX_DOWNLOAD_RETRIES) return;
+  let can = false;
+  try { can = item.canResume(); } catch (e) { can = false; }
+  if (!can) return;
+  rec.retries += 1;
+  const wait = Math.min(2000 * rec.retries, 30000);
+  rec.resumeTimer = setTimeout(() => {
+    rec.resumeTimer = null;
+    if (rec.state !== 'interrupted') return;
+    if (isOnline()) tryResume(rec, item); // offline: resumeInterruptedDownloads() runs when the network is back
+    broadcastDownloads(true);
+  }, wait);
+  if (rec.resumeTimer.unref) rec.resumeTimer.unref();
+}
+
+function resumeInterruptedDownloads() {
+  for (const rec of downloads) {
+    const item = downloadItems.get(rec.id);
+    if (rec.state === 'interrupted' && item) {
+      clearTimeout(rec.resumeTimer);
+      rec.resumeTimer = null;
+      rec.retries = Math.min(rec.retries, MAX_DOWNLOAD_RETRIES - 1);
+      tryResume(rec, item);
+    }
+  }
+  broadcastDownloads(true);
+}
+
 function trackDownload(item) {
   const rec = {
     id: ++downloadSeq, name: item.getFilename(), savePath: '', state: 'progressing',
     received: 0, total: item.getTotalBytes ? item.getTotalBytes() : 0, startedAt: Date.now(),
+    retries: 0, canResume: false, lastBytes: 0, resumeTimer: null,
   };
   downloads.unshift(rec);
   downloadItems.set(rec.id, item);
@@ -856,6 +1106,9 @@ function trackDownload(item) {
       rec.total = item.getTotalBytes();
       try { rec.savePath = item.getSavePath() || rec.savePath; } catch (err) { /* ignore */ }
       rec.state = st === 'interrupted' ? 'interrupted' : (item.isPaused() ? 'paused' : 'progressing');
+      try { rec.canResume = item.canResume(); } catch (err) { rec.canResume = false; }
+      if (rec.received > rec.lastBytes) { rec.lastBytes = rec.received; rec.retries = 0; } // progress made: reset the retry budget
+      if (rec.state === 'interrupted') scheduleDownloadResume(rec, item);
       broadcastDownloads(false);
     });
   }
@@ -863,7 +1116,10 @@ function trackDownload(item) {
     try { rec.savePath = item.getSavePath() || rec.savePath; } catch (err) { /* ignore */ }
     rec.state = result;
     if (result === 'completed' && rec.total) rec.received = rec.total;
-    downloadItems.delete(rec.id);
+    let keep = false;
+    if (result === 'interrupted') { try { keep = item.canResume(); } catch (err) { keep = false; } }
+    rec.canResume = keep;
+    if (keep) scheduleDownloadResume(rec, item); else downloadItems.delete(rec.id);
     broadcastDownloads(true);
   });
   broadcastDownloads(true);
@@ -891,6 +1147,10 @@ function settingsSnapshot() {
     kiosk: isKiosk(),
     notifications: notificationsAllowed(),
     launchAtLogin: launchAtLoginWanted(),
+    runInBackground: runInBackgroundWanted(),
+    dataSaverMode: dataSaverMode(),
+    slow: !!(netQuality && netQuality.slow),
+    trayAvailable: !!tray,
     pushBuild: !!config.push_enabled,
     rememberLoginEnabled: !!config.remember_login_enabled,
     hasSavedLogin,
@@ -1005,6 +1265,15 @@ function registerIpc() {
       if (RISKY_OPEN_EXT.test(d.savePath) || !fs.existsSync(d.savePath)) { shell.showItemInFolder(d.savePath); return false; }
       return (await shell.openPath(d.savePath)) === '';
     },
+    'download-resume': (id) => {
+      const rec = downloads.find((x) => x.id === id);
+      const it = downloadItems.get(id);
+      if (!rec || !it) return false;
+      rec.retries = 0;
+      const ok = tryResume(rec, it);
+      broadcastDownloads(true);
+      return ok;
+    },
     'download-cancel': (id) => {
       const it = downloadItems.get(id);
       if (it) { try { it.cancel(); } catch (e) { /* ignore */ } }
@@ -1066,6 +1335,16 @@ function registerIpc() {
       store.set('launch_at_login', !!on);
       applyLaunchAtLogin();
       return launchAtLoginWanted();
+    },
+    'set-data-saver': (mode) => {
+      store.set('data_saver', mode === 'on' || mode === 'off' ? mode : 'auto');
+      broadcastState();
+      broadcastNetToGuests();
+      return dataSaverMode();
+    },
+    'set-run-in-background': (on) => {
+      store.set('run_in_background', !!on);
+      return runInBackgroundWanted();
     },
     'set-notifications': (on) => {
       store.set('notifications', !!on);
@@ -1142,6 +1421,8 @@ function registerIpc() {
       trusted,
       offlinePage,
       online: isOnline(),
+      slow: !!(netQuality && netQuality.slow),
+      saver: dataSaverActive(),
       platform: process.platform,
       script: trusted ? buildInjection({ maxFileBytes: MAX_QUEUEABLE_FILE_BYTES, baseUrl: href }) : null,
       credentials: trusted && config.remember_login_enabled && vault.available(),
@@ -1186,6 +1467,10 @@ function registerIpc() {
       return;
     }
     sendShell('shell:open-page', url);
+  });
+  ipcMain.on('w2a:badge', (event, n) => {
+    if (!isGuestSender(event.sender)) return;
+    setBadge(n);
   });
   ipcMain.on('w2a:share-text', (event, text) => {
     if (!isGuestSender(event.sender)) return;
@@ -1233,6 +1518,23 @@ function setupSession() {
       .replace(new RegExp('\\s*' + escapeRegExp(app.getName()) + '/[\\d.]+', 'i'), '');
     ses.setUserAgent(ua);
   } catch (e) { /* cosmetic */ }
+
+  // Data saver: only does anything while it is switched on (or auto + slow).
+  try {
+    if (ses.webRequest) {
+      const appHost = hostOf(config.app_url);
+      ses.webRequest.onBeforeRequest((details, cb) => {
+        cb(dataSaverActive() && shouldBlockRequest(details, appHost) ? { cancel: true } : {});
+      });
+      ses.webRequest.onHeadersReceived((details, cb) => {
+        cb(dataSaverActive() && shouldBlockByHeaders(details) ? { cancel: true } : {});
+      });
+      ses.webRequest.onBeforeSendHeaders((details, cb) => {
+        if (!dataSaverActive()) return cb({});
+        cb({ requestHeaders: Object.assign({}, details.requestHeaders, { 'Save-Data': 'on' }) });
+      });
+    }
+  } catch (e) { /* never block startup over this */ }
 
   const allowed = (permission) => {
     if (permission === 'media') return !!config.filecamera_enabled;
@@ -1286,10 +1588,7 @@ function start() {
   if (process.platform === 'win32') app.setAppUserModelId(config.package_name);
 
   app.on('second-instance', (event, argv) => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    showMainWindow(); // also brings the app back from the tray
     const url = openUrlArg(argv);
     if (url) navigateGuest(url);
   });
@@ -1298,10 +1597,13 @@ function start() {
     if (contents.getType() === 'webview') attachGuestHandlers(contents);
   });
 
-  app.on('before-quit', () => { if (updater) updater.installOnQuit(); });
-  app.on('window-all-closed', () => app.quit());
+  app.on('before-quit', () => {
+    isQuitting = true; // let the window actually close this time
+    if (updater) updater.installOnQuit();
+  });
+  app.on('window-all-closed', () => { if (!backgroundActive()) app.quit(); });
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0 && app.isReady()) createWindow(config.app_url);
+    if (app.isReady()) showMainWindow(); // dock icon click on macOS
   });
 
   app.whenReady().then(() => {
@@ -1320,7 +1622,7 @@ function start() {
         child.unref();
       },
       openPath: (file) => shell.openPath(file),
-      quit: () => app.quit(),
+      quit: () => quitForReal(),
       onChange: () => {
         state.updateStatus = updater.status;
         state.updateProgress = updater.progress;
@@ -1348,17 +1650,15 @@ function start() {
       // only ever replay to the app's own site
       allowUrl: (u) => isAllowedTarget(u),
     });
+    usage = new UsageTracker(store);
+    netQuality = new NetQuality({ initialSlow: store.get('last_net_slow', false) === true });
+    netQuality.on('change', onNetQualityChange);
     vault = new CredentialVault(store, safeStorage);
     applock = new AppLock(store, undefined, config.applock_enabled);
     notifier = new Notifier(store, (title, body) => {
       if (!Notification.isSupported()) return;
       const n = new Notification({ title: title || config.app_name, body });
-      n.on('click', () => {
-        if (mainWindow) {
-          if (mainWindow.isMinimized()) mainWindow.restore();
-          mainWindow.focus();
-        }
-      });
+      n.on('click', showMainWindow);
       n.show();
     });
 
@@ -1371,6 +1671,11 @@ function start() {
       broadcastState();
       if (online) {
         toast('Back online');
+        resumeInterruptedDownloads();
+        if (state.startupSnapshot && isLive(guest) && state.showingCachedFor) {
+          state.startupSnapshot = false;
+          guest.loadURL(state.showingCachedFor).catch(() => {});
+        }
         flushQueue();
         checkForUpdate();
         uploadPendingCrash();
@@ -1391,6 +1696,7 @@ function start() {
     setupShortcuts();
     notifier.restore();
 
+    createTray();
     createWindow(openUrlArg(process.argv) || config.app_url);
 
     powerMonitor.on('lock-screen', lockNow);
@@ -1405,6 +1711,16 @@ function start() {
       if (isOnline() && queue.size() > 0 && !retryTimer) flushQueue();
     }, 60 * 1000).unref();
     setInterval(() => checkForUpdate(), UPDATE_CHECK_MIN_INTERVAL_MS).unref();
+    // Light speed check every 45s (one HEAD request) so a slow link is noticed
+    // even when nobody is loading pages; skipped while hidden or offline.
+    const speedProbe = netutil.makeProbeRequester();
+    setInterval(async () => {
+      if (!isOnline() || isQuitting || !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return;
+      const t0 = Date.now();
+      try { await speedProbe(config.app_url, 'HEAD', 8000); netQuality.record('probe', Date.now() - t0); } catch (e) { /* offline handling lives in connectivity */ }
+    }, 45 * 1000).unref();
+    // Re-warm the favourite pages now and then (skipped by itself on Data saver).
+    setInterval(() => { prefetchNavTabs(); }, 30 * 60 * 1000).unref();
 
     if (queue.size() > 0 && isOnline()) flushQueue();
     checkForUpdate();

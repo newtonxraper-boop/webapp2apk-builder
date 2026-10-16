@@ -66,3 +66,25 @@ Opening a link (or a bottom tab) opens the next page in its own view while the p
 - Pages that change themselves in place (a form submit, or a button that sets `location.href`) use normal browser history, so going back from those can still reload.
 - Opening a new page after going back drops the pages "forward" of it, like normal history. Signing out (a /logout address) drops every kept page.
 - Login, checkout, payment and cart pages are never opened this way.
+
+
+## Tray, background mode, window memory and badge
+
+- **Tray / background mode** - closing the window hides the app in the system tray (tray menu: Open, Quit) so reminders, notifications and offline sync keep running. Turn off in Settings > "Keep running in the background". When started by "Open when the computer starts" it goes straight to the tray. If the system has no tray, closing quits as before.
+- **Window memory** - size, position and maximised state are saved and restored (a position on a disconnected monitor is ignored).
+- **Badge** - the site calls `DesktopApp.setBadge(n)` (and `DesktopApp.clearBadge()`): Windows taskbar overlay, macOS dock badge, Linux launcher count. `0` clears it. Example: `window.DesktopApp && DesktopApp.setBadge(unreadCount)`.
+
+## Speed features
+
+- **Faster start** - the splash hides as soon as the page is ready; if the live site is slow to answer at launch (3s, or 1.2s if the last session was slow) the saved copy shows at once and switches to the live page when it arrives.
+- **Smart prefetch** - the pages you open most are pre-loaded first, then the nav tabs; fewer and one-at-a-time on a slow link; refreshed every 30 min.
+- **Data saver** (Settings: Auto / Always on / Off) - blocks video/audio, embedded YouTube/Vimeo/TikTok players and images over 400 KB, sends `Save-Data: on`, and pauses guess-ahead prefetching. Sites can check `DesktopApp.dataSaver()` / `DesktopApp.isSlow()` and listen for the `desktopapp-network` event (`JSON.parse(e.detail)` -> `{slow, dataSaver}`).
+- **Slow-connection banner** - shown when page loads / a 45s probe stay slow, with a one-click "Turn on Data saver".
+- **Resumable downloads** - a dropped connection resumes from the same byte automatically (growing pauses, and immediately when the network returns); "Resume now" in the Downloads panel.
+
+## Appearance
+
+- **Custom title bar** - app logo, name, current page title and a connection dot; Windows/Linux keep their native minimise/maximise/close (dark-tinted), macOS keeps its traffic lights. Hidden in kiosk mode.
+- **Splash** - logo pops in with a glow and a slim sliding progress line.
+- **Page transitions** - pages fade/slide in, and a thin accent loading bar runs along the top while a page loads.
+- **Settings / Downloads panels** - rounded card tiles with icons, blurred backdrop, animated open, nicer switches, progress bars and scrollbars.

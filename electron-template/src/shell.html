@@ -16,6 +16,8 @@
   .banner.show { display: flex; }
   #offlineBanner { background: #b45309; color: #fff; cursor: pointer; }
   #updateBanner { background: var(--accent); color: #04150a; cursor: pointer; font-weight: 600; }
+  #slowBanner { background: #3b3a1a; color: #ffe9a8; }
+  #slowBanner button { border: 1px solid rgba(255,233,168,.6); background: transparent; color: inherit; border-radius: 999px; padding: 3px 12px; font-size: 12px; cursor: pointer; }
   #syncBanner { background: #1e3a5f; color: #fff; }
   #syncBanner button { border: 1px solid rgba(255,255,255,.5); background: transparent; color: #fff; border-radius: 999px; padding: 3px 12px; font-size: 12px; cursor: pointer; }
   #syncBanner button:hover { background: rgba(255,255,255,.12); }
@@ -28,11 +30,16 @@
 
   /* ---- floating back / refresh / settings buttons ---- */
   #fab { position: absolute; right: 14px; bottom: 14px; display: flex; flex-direction: column; gap: 8px; z-index: 30; }
-  #fab button { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--line); background: rgba(23,26,33,.86);
-    color: var(--text); font-size: 17px; cursor: pointer; backdrop-filter: blur(6px); box-shadow: 0 4px 12px rgba(0,0,0,.35); }
-  #fab button:hover:not(:disabled) { background: var(--accent); color: #04150a; }
-  #fab button:disabled { opacity: .4; cursor: default; }
-
+  #fab button { width: 40px; height: 40px; border-radius: 14px; border: 1px solid var(--line);
+    background: linear-gradient(160deg, rgba(40,44,54,.92), rgba(18,20,26,.92));
+    color: var(--text); font-size: 17px; cursor: pointer; backdrop-filter: blur(8px); box-shadow: 0 6px 16px rgba(0,0,0,.45);
+    transition: transform .18s cubic-bezier(.3,1.4,.5,1), background .2s, color .2s, box-shadow .2s, border-radius .2s; }
+  #fab button:hover:not(:disabled) { background: var(--accent); color: #04150a; transform: translateX(-4px); border-radius: 50%;
+    box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 50%, transparent); }
+  #fab button:active:not(:disabled) { transform: scale(.92); }
+  #fab button:disabled { opacity: .35; cursor: default; }
+  #fab button.busy { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 25%, transparent); } }
   #fab button.busy { border-color: var(--accent); color: var(--accent); }
   .dl-item { padding: 10px 0; border-bottom: 1px solid var(--line); }
   .dl-item .t { font-weight: 600; font-size: 14.5px; word-break: break-all; }
@@ -55,13 +62,26 @@
   #toast.show { opacity: 1; transform: translate(-50%, 0); }
 
 
-  /* ---- bottom tab bar ---- */
-  #tabbar { display: none; background: var(--panel); border-top: 1px solid var(--line); flex: 0 0 auto; }
-  #tabbar button { flex: 1; border: none; background: transparent; color: var(--muted); padding: 8px 4px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; cursor: pointer; }
-  #tabbar button:hover { background: rgba(255,255,255,.04); }
-  #tabbar .ic { font-size: 18px; line-height: 1; }
-  #tabbar .lb { font-size: 10.5px; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #tabbar button.active { color: var(--accent); }
+  /* ---- bottom tab bar: separate floating "pill" tabs ---- */
+  #tabbar { display: none; flex: 0 0 auto; gap: 10px; padding: 8px 14px 10px; justify-content: center; align-items: stretch;
+    background: linear-gradient(to top, var(--bg) 60%, transparent); }
+  #tabbar button { position: relative; flex: 1 1 0; max-width: 170px; min-width: 0; border: 1px solid var(--line); border-radius: 16px;
+    background: linear-gradient(160deg, rgba(255,255,255,.06), rgba(255,255,255,.015)); color: var(--muted);
+    padding: 8px 6px 7px; display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; overflow: hidden;
+    box-shadow: 0 4px 14px rgba(0,0,0,.35); transition: transform .18s cubic-bezier(.3,1.4,.5,1), background .2s, border-color .2s, box-shadow .2s, color .2s; }
+  #tabbar button:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--text);
+    box-shadow: 0 8px 18px rgba(0,0,0,.45); }
+  #tabbar button:active { transform: translateY(0) scale(.96); }
+  #tabbar .ic { font-size: 19px; line-height: 1; display: inline-block; transition: transform .2s cubic-bezier(.3,1.6,.5,1); }
+  #tabbar button:hover .ic { transform: scale(1.15) rotate(-4deg); }
+  #tabbar .lb { font-size: 10.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: .2px; }
+  #tabbar button.active { color: #fff; border-color: var(--accent);
+    background: linear-gradient(160deg, color-mix(in srgb, var(--accent) 45%, transparent), color-mix(in srgb, var(--accent) 12%, transparent));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent), 0 6px 20px color-mix(in srgb, var(--accent) 35%, transparent); }
+  #tabbar button.active .lb { font-weight: 700; }
+  #tabbar button.active::after { content: ''; position: absolute; left: 50%; bottom: 0; width: 26px; height: 3px; transform: translateX(-50%);
+    border-radius: 3px 3px 0 0; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+  @media (max-width: 560px) { #tabbar { gap: 6px; padding: 6px 8px 8px; } #tabbar button { border-radius: 13px; } }
 
   /* ---- modal overlays: settings / lock / qr ---- */
   .overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.6); z-index: 60; }
@@ -93,15 +113,73 @@
   #lockOverlay .card { text-align: center; width: min(360px, 90vw); }
   #lockOverlay img { width: 64px; height: 64px; border-radius: 16px; margin-bottom: 8px; }
   #qrOverlay video { width: 100%; border-radius: 10px; background: #000; max-height: 60vh; }
+
+  /* ================= appearance upgrade ================= */
+  #titlebar { flex: 0 0 auto; height: 38px; display: flex; align-items: center; gap: 10px; padding: 0 12px;
+    background: linear-gradient(to bottom, color-mix(in srgb, var(--accent) 9%, var(--bg)), var(--bg));
+    border-bottom: 1px solid var(--line); -webkit-app-region: drag; user-select: none; position: relative; z-index: 40; }
+  #titlebar.mac { padding-left: 82px; }
+  #titlebar.win { padding-right: 150px; }
+  #titlebar img { width: 20px; height: 20px; border-radius: 6px; box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 35%, transparent); }
+  #tbName { font-weight: 700; font-size: 13px; letter-spacing: .3px; white-space: nowrap; }
+  #tbSep { color: var(--muted); opacity: .5; }
+  #tbTitle { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+  #tbDot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); flex: 0 0 auto; transition: background .3s, box-shadow .3s; }
+  #tbDot.off { background: #b45309; box-shadow: 0 0 8px #b45309; }
+  body.kiosk #titlebar { display: none; }
+
+  #loadbar { position: absolute; top: 0; left: 0; height: 3px; width: 0; z-index: 35; pointer-events: none; opacity: 0;
+    background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 40%, #fff)); box-shadow: 0 0 10px var(--accent); }
+  #loadbar.run { opacity: 1; width: 82%; transition: width 8s cubic-bezier(.1,.7,.2,1); }
+  #loadbar.done { opacity: 0; width: 100%; transition: width .2s ease-out, opacity .4s ease .2s; }
+  @keyframes pageIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  #webviewHost webview:not(.bg) { animation: pageIn .26s ease-out; }
+
+  #splash { background: radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--primary) 70%, #fff) 0%, var(--primary) 55%, color-mix(in srgb, var(--primary) 60%, #000) 100%); }
+  #splash img { animation: splashIn .7s cubic-bezier(.2,1.2,.4,1) both, glow 2.4s ease-in-out .7s infinite; box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+  #splash .spinner { display: none; }
+  #splash::after { content: ''; width: 120px; height: 3px; border-radius: 3px; margin-top: 4px;
+    background: linear-gradient(90deg, transparent 0, rgba(255,255,255,.9) 50%, transparent 100%) 0 0 / 60px 3px no-repeat rgba(255,255,255,.22);
+    animation: slide 1.1s ease-in-out infinite; }
+  @keyframes splashIn { from { opacity: 0; transform: scale(.6) translateY(10px); } to { opacity: 1; transform: none; } }
+  @keyframes glow { 50% { box-shadow: 0 10px 52px rgba(255,255,255,.35); } }
+  @keyframes slide { from { background-position: -60px 0; } to { background-position: 120px 0; } }
+
+  .overlay { backdrop-filter: blur(6px); background: rgba(5,7,10,.62); }
+  .overlay.show .card { animation: cardIn .22s cubic-bezier(.2,1.1,.4,1); }
+  @keyframes cardIn { from { opacity: 0; transform: translateY(14px) scale(.97); } to { opacity: 1; transform: none; } }
+  .card { background: linear-gradient(170deg, color-mix(in srgb, var(--accent) 6%, var(--panel)), var(--panel) 40%); border-radius: 20px;
+    padding: 20px 20px 16px; box-shadow: 0 24px 60px rgba(0,0,0,.55), 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent); }
+  .card h2 { font-size: 20px; padding-bottom: 12px; margin-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .card h2 button { width: 32px; height: 32px; border-radius: 10px; background: rgba(255,255,255,.06); transition: background .15s, color .15s; }
+  .card h2 button:hover { background: var(--accent); color: #04150a; }
+  .row { border-top: none; background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.05); border-radius: 14px; padding: 12px 14px; margin: 8px 0;
+    transition: border-color .15s, background .15s; }
+  .row:hover { border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: rgba(255,255,255,.055); }
+  .row .rowic { display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center; margin-right: 10px; border-radius: 9px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent); font-size: 15px; flex: 0 0 auto; }
+  .row .t { display: flex; align-items: center; }
+  .dl-item { background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.05); border-radius: 14px; padding: 12px 14px; margin: 8px 0; }
+  .dl-bar { height: 6px; border-radius: 6px; }
+  .dl-bar span { background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 50%, #fff)); border-radius: 6px; transition: width .3s; }
+  .btn { transition: transform .15s, box-shadow .15s; }
+  .btn:hover:not([disabled]) { transform: translateY(-1px); box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 40%, transparent); }
+  .switch input:checked + .slider { box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 55%, transparent); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--accent) 60%, transparent); background-clip: padding-box; }
 </style>
 </head>
 <body>
 <div id="app">
+  <div id="titlebar"><img src="icon.png" alt="" onerror="this.style.display='none'"><span id="tbName"></span><span id="tbSep">&middot;</span><span id="tbTitle"></span><span id="tbDot" title="Connection"></span></div>
   <div id="offlineBanner" class="banner">No internet connection &middot; click to retry</div>
   <div id="updateBanner" class="banner">A new version is available - click to download</div>
+  <div id="slowBanner" class="banner"><span id="slowText"></span><button type="button" id="slowSaverBtn">Turn on Data saver</button></div>
   <div id="syncBanner" class="banner"><span id="syncText"></span><button type="button" id="syncNowBtn">Send now</button></div>
 
   <div id="content-wrap">
+    <div id="loadbar"></div>
     <div id="webviewHost"></div>
     <div id="fab">
       <button type="button" id="backBtn" title="Back" aria-label="Back" disabled>&#8592;</button>
@@ -148,6 +226,18 @@
       <div class="row">
         <div><div class="t">Open when the computer starts</div><div class="s">Start this app automatically when you turn on or sign in to your computer</div></div>
         <label class="switch"><input type="checkbox" id="loginStartSwitch"><span class="slider"></span></label>
+      </div>
+
+      <div class="row">
+        <div><div class="t">Data saver</div><div class="s">Skips videos, embedded video players and large images, and stops guessing-ahead downloads. Auto = only while the connection is slow.</div></div>
+        <select id="saverSelect" style="background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px 8px">
+          <option value="auto">Auto</option><option value="on">Always on</option><option value="off">Off</option>
+        </select>
+      </div>
+
+      <div class="row" id="bgRow">
+        <div><div class="t">Keep running in the background</div><div class="s">Closing the window hides the app in the system tray so reminders and sync keep working. Use the tray icon &gt; Quit to exit completely.</div></div>
+        <label class="switch"><input type="checkbox" id="bgSwitch"><span class="slider"></span></label>
       </div>
 
       <div class="row" id="notifRow" style="display:none">
@@ -291,6 +381,7 @@
   }
   function showPage(i) {
     pos = i;
+    setTitle(pages[i] && pages[i].title);
     pages.forEach((p, j) => p.wv.classList.toggle('bg', j !== i));
     const p = pages[i];
     webview = p.wv;
@@ -307,7 +398,10 @@
     wv.setAttribute('webpreferences', 'contextIsolation=yes,nodeIntegration=no');
     wv.setAttribute('src', url);
     const page = { wv, url };
-    wv.addEventListener('dom-ready', () => { if (pages[pos] === page) activateGuest(page); });
+    wv.addEventListener('page-title-updated', (e) => { page.title = e.title || ''; if (pages[pos] === page) setTitle(page.title); });
+    wv.addEventListener('did-start-loading', () => { if (pages[pos] === page) loadBar(true); });
+    wv.addEventListener('did-stop-loading', () => { if (pages[pos] === page) loadBar(false); });
+    wv.addEventListener('dom-ready', () => { hideSplash(); if (pages[pos] === page) activateGuest(page); });
     wv.addEventListener('did-stop-loading', () => { hideSplash(); if (pages[pos] === page) syncNav(); });
     wv.addEventListener('did-fail-load', hideSplash);
     const track = (e) => {
@@ -387,10 +481,16 @@
   function applyState(s) {
     current = Object.assign(current, s);
     $('offlineBanner').classList.toggle('show', !s.online);
+    $('tbDot').classList.toggle('off', !s.online);
+    document.body.classList.toggle('kiosk', !!s.kiosk);
     $('updateBanner').classList.toggle('show', !!s.updateUrl);
     $('updateBanner').textContent = updateText(current).banner;
     const q = s.queueSize || 0;
     $('syncBanner').classList.toggle('show', q > 0);
+    const showSlow = !!s.slow && !!s.online;
+    $('slowBanner').classList.toggle('show', showSlow);
+    $('slowText').textContent = s.dataSaver ? 'Slow connection \u00b7 Data saver is on (video and big images are skipped)' : 'Slow connection detected';
+    $('slowSaverBtn').style.display = s.dataSaver ? 'none' : '';
     $('syncText').textContent = q === 1 ? '1 item waiting to sync' : q + ' items waiting to sync';
     if (s.locked) showLock(!!s.lockSetupRequired); else $('lockOverlay').classList.remove('show');
     if ($('settingsOverlay').classList.contains('show')) refreshSettings();
@@ -402,7 +502,7 @@
     const render = (items) => {
       items = items || [];
       $('dlBtn').style.display = items.length ? '' : 'none';
-      $('dlBtn').classList.toggle('busy', items.some((d) => d.state === 'progressing' || d.state === 'paused'));
+      $('dlBtn').classList.toggle('busy', items.some((d) => d.state === 'progressing' || d.state === 'paused' || (d.state === 'interrupted' && d.canResume)));
       $('dlEmpty').style.display = items.length ? 'none' : '';
       list.textContent = '';
       items.forEach((d) => {
@@ -412,11 +512,12 @@
         const status = d.state === 'completed' ? 'Done \u00b7 ' + fmtBytes(d.total || d.received)
           : d.state === 'progressing' ? (d.total > 0 ? pct + '% \u00b7 ' + fmtBytes(d.received) + ' of ' + fmtBytes(d.total) : fmtBytes(d.received))
           : d.state === 'paused' ? 'Paused'
+          : d.state === 'interrupted' && d.canResume ? 'Connection lost \u00b7 ' + fmtBytes(d.received) + (d.total > 0 ? ' of ' + fmtBytes(d.total) : '') + ' saved \u00b7 resuming...'
           : d.state === 'cancelled' ? 'Cancelled' : 'Failed';
         const name = document.createElement('div'); name.className = 't'; name.textContent = d.name;
         const sub = document.createElement('div'); sub.className = 's'; sub.textContent = status;
         row.appendChild(name); row.appendChild(sub);
-        if (d.state === 'progressing' || d.state === 'paused') {
+        if (d.state === 'progressing' || d.state === 'paused' || (d.state === 'interrupted' && d.canResume)) {
           const bar = document.createElement('div'); bar.className = 'dl-bar';
           const fill = document.createElement('span'); fill.style.width = pct + '%'; bar.appendChild(fill);
           row.appendChild(bar);
@@ -430,6 +531,9 @@
         if (d.state === 'completed') {
           if (d.canOpen) add('Open', () => api.invoke('download-open', d.id));
           add('Show in folder', () => api.invoke('download-show', d.id), true);
+        } else if (d.state === 'interrupted' && d.canResume) {
+          add('Resume now', () => api.invoke('download-resume', d.id));
+          add('Cancel', () => api.invoke('download-cancel', d.id), true);
         } else if (d.state === 'progressing' || d.state === 'paused') {
           add('Cancel', () => api.invoke('download-cancel', d.id), true);
         }
@@ -468,6 +572,24 @@
   }
 
   // ---------------------------------------------------------- splash
+  function setTitle(t) {
+    t = (t || '').trim();
+    const same = !t || (cfg && t.toLowerCase() === cfg.app_name.toLowerCase());
+    $('tbTitle').textContent = same ? '' : t;
+    $('tbSep').style.display = same ? 'none' : '';
+  }
+  let barTimer = null;
+  function loadBar(on) {
+    const b = $('loadbar');
+    clearTimeout(barTimer);
+    if (on) {
+      b.className = ''; void b.offsetWidth; b.className = 'run';
+      barTimer = setTimeout(() => loadBar(false), 15000); // never leave it hanging
+    } else if (b.classList.contains('run')) {
+      b.className = 'done';
+      barTimer = setTimeout(() => { b.className = ''; }, 700);
+    }
+  }
   function hideSplash() { $('splash').classList.add('hide'); }
 
 
@@ -508,7 +630,22 @@
   }
 
   // ---------------------------------------------------------- settings
+  const ROW_ICONS = [
+    [/app lock|pin/i, '\uD83D\uDD12'], [/kiosk/i, '\uD83D\uDDA5\uFE0F'], [/open when|starts/i, '\uD83D\uDE80'], [/data saver/i, '\uD83D\uDCF6'],
+    [/background/i, '\uD83D\uDD04'], [/notification/i, '\uD83D\uDD14'], [/sync|offline/i, '\u2601\uFE0F'], [/storage|cache/i, '\uD83D\uDCBE'],
+    [/login|password|saved/i, '\uD83D\uDD11'], [/update|version/i, '\u2B06\uFE0F'], [/privacy/i, '\uD83D\uDEE1\uFE0F'],
+  ];
+  function decorateRows() {
+    document.querySelectorAll('#settingsOverlay .row .t, #osOverlay .row .t').forEach((t) => {
+      if (t.querySelector('.rowic')) return;
+      const hit = ROW_ICONS.find((r) => r[0].test(t.textContent));
+      if (!hit) return;
+      const ic = document.createElement('span'); ic.className = 'rowic'; ic.textContent = hit[1];
+      t.insertBefore(ic, t.firstChild);
+    });
+  }
   async function refreshSettings() {
+    decorateRows();
     const s = await api.invoke('get-settings');
     if (!s) return;
     $('lockSection').style.display = s.appLockAvailable ? '' : 'none';
@@ -522,6 +659,9 @@
     $('kioskSwitch').checked = !!s.kiosk;
     $('notifSwitch').checked = !!s.notifications;
     $('loginStartSwitch').checked = s.launchAtLogin !== false;
+    $('saverSelect').value = s.dataSaverMode || 'auto';
+    $('bgRow').style.display = s.trayAvailable ? '' : 'none';
+    $('bgSwitch').checked = s.runInBackground !== false;
     $('notifSub').textContent = s.pushBuild
       ? 'Allow this app and its website to show desktop notifications'
       : 'Reminders and download alerts from this app';
@@ -588,6 +728,9 @@
 
     $('kioskSwitch').addEventListener('change', () => api.invoke('set-kiosk', $('kioskSwitch').checked));
     $('loginStartSwitch').addEventListener('change', () => api.invoke('set-launch-at-login', $('loginStartSwitch').checked));
+    $('saverSelect').addEventListener('change', () => api.invoke('set-data-saver', $('saverSelect').value));
+    $('slowSaverBtn').addEventListener('click', () => api.invoke('set-data-saver', 'on'));
+    $('bgSwitch').addEventListener('change', () => api.invoke('set-run-in-background', $('bgSwitch').checked));
     $('notifSwitch').addEventListener('change', () => api.invoke('set-notifications', $('notifSwitch').checked));
     $('settingsSyncNow').addEventListener('click', () => api.invoke('sync-now'));
     $('clearCacheBtn').addEventListener('click', async () => { await api.invoke('clear-cache'); refreshSettings(); });
@@ -708,6 +851,8 @@
     const b = await api.invoke('boot');
     cfg = b.config; platform = b.platform; partitionName = b.partition;
     document.title = cfg.app_name;
+    $('tbName').textContent = cfg.app_name;
+    $('titlebar').classList.add(platform === 'darwin' ? 'mac' : 'win');
     document.documentElement.style.setProperty('--primary', cfg.primary_color);
     document.documentElement.style.setProperty('--accent', cfg.accent_color);
     if (!cfg.splash_enabled) hideSplash();
