@@ -413,11 +413,13 @@ const recentlyCached = new Map(); // url -> timestamp, to avoid re-fetching in a
 
 function cachePageInBackground(url) {
   if (!cache || !isOnline() || !cache.isCacheable(url)) return;
+  // The page just loaded from the network: replace its saved copy with the
+  // fresh one right away (only a 2 s guard against duplicate load events).
   const last = recentlyCached.get(url) || 0;
-  if (Date.now() - last < 20000) return;
+  if (Date.now() - last < 2000) return;
   recentlyCached.set(url, Date.now());
   if (recentlyCached.size > 200) recentlyCached.clear();
-  cache.fetchAndCache(url).catch(() => {});
+  cache.replaceFromNetwork(url).catch(() => {});
 }
 
 async function prefetchNavTabs() {
@@ -969,7 +971,7 @@ function attachGuestHandlers(contents) {
       showOfflineFallback(contents, url).then(() => {
         toast('Showing saved page - loading the latest...');
         if (!isOnline()) return;
-        cache.fetchAndCache(url)
+        cache.replaceFromNetwork(url)
           .catch(() => {})
           .then(() => {
             if (state.startupSnapshot && isLive(contents) && state.showingCachedFor === url) {
@@ -1241,6 +1243,13 @@ function registerIpc() {
     reload: () => attemptRealRefresh(),
     retry: () => attemptRealRefresh(),
     'sync-now': () => forceSendQueueNow(),
+    'set-titlebar-color': (bg, fg) => {
+      const ok = (c) => typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c);
+      if (process.platform !== 'darwin' && mainWindow && !mainWindow.isDestroyed() && ok(bg) && ok(fg) && mainWindow.setTitleBarOverlay) {
+        try { mainWindow.setTitleBarOverlay({ color: bg, symbolColor: fg, height: 38 }); } catch (_) {}
+      }
+      return true;
+    },
     'set-active-guest': (id) => {
       for (const g of guests) {
         if (isLive(g) && g.id === Number(id)) { guest = g; return true; }

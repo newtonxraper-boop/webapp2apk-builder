@@ -139,6 +139,16 @@ class PageCache {
     }
   }
 
+  /** Drop the saved copy of one page (body + meta). Returns true if something was removed. */
+  remove(url) {
+    const p = this._paths(url);
+    let removed = false;
+    for (const f of [p.body, p.meta]) {
+      try { fs.unlinkSync(f); removed = true; } catch (e) { /* not there */ }
+    }
+    return removed;
+  }
+
   has(url) {
     const p = this._paths(url);
     return fs.existsSync(p.body) && fs.existsSync(p.meta);
@@ -194,23 +204,36 @@ class PageCache {
    * one request.
    * @returns {Promise<{stored:boolean, notModified?:boolean, reason?:string, status?:number}>}
    */
-  fetchAndCache(url) {
+  fetchAndCache(url, opts) {
     if (!this.isCacheable(url)) return Promise.resolve({ stored: false, reason: 'not-cacheable' });
+    const force = !!(opts && opts.replace);
     const key = stripFragment(url);
-    if (this._inflight.has(key)) return this._inflight.get(key);
-    const job = this._fetchAndCache(key).finally(() => this._inflight.delete(key));
-    this._inflight.set(key, job);
+    const jobKey = force ? key + '\u0000replace' : key;
+    if (this._inflight.has(jobKey)) return this._inflight.get(jobKey);
+    const job = this._fetchAndCache(key, force).finally(() => this._inflight.delete(jobKey));
+    this._inflight.set(jobKey, job);
     return job;
   }
 
-  async _fetchAndCache(url) {
+  /**
+   * Replace the saved copy with what the network serves right now: no
+   * If-None-Match / If-Modified-Since (so a "304 unchanged" can never keep an
+   * old copy alive), the old copy is overwritten by the fresh one, and it is
+   * deleted outright if the server says the page is gone (404 / 410).
+   * Network errors and 5xx leave the old copy alone so offline use still works.
+   */
+  replaceFromNetwork(url) {
+    return this.fetchAndCache(url, { replace: true });
+  }
+
+  async _fetchAndCache(url, force) {
     const p = this._paths(url);
     const existing = fs.existsSync(p.body) ? this._readMeta(p.meta) : null;
     let res;
     try {
       res = await this.fetcher(url, {
-        etag: existing ? existing.etag : '',
-        lastModified: existing ? existing.lastModified : '',
+        etag: existing && !force ? existing.etag : '',
+        lastModified: existing && !force ? existing.lastModified : '',
       });
     } catch (e) {
       return { stored: false, reason: 'network', error: e && e.message };
@@ -259,6 +282,10 @@ class PageCache {
         } catch (e) { /* malformed HTML - the page itself still cached fine */ }
       }
       return { stored: true, status: res.status };
+    }
+    if (force && (res.status === 404 || res.status === 410)) {
+      this.remove(url);
+      return { stored: false, reason: 'gone', removed: true, status: res.status };
     }
     return { stored: false, reason: 'status', status: res.status };
   }

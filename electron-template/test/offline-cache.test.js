@@ -142,3 +142,42 @@ test('clear() removes everything', async () => {
   assert.strictEqual(c.stats().files, 0);
   assert.ok(!c.has('https://shop.example.com/a'));
 });
+
+test('replaceFromNetwork overwrites the saved copy and ignores 304 validators', async () => {
+  const os = require('os'), fs2 = require('fs'), path2 = require('path');
+  const { PageCache } = require('../src/lib/offline-cache');
+  const dir = fs2.mkdtempSync(path2.join(os.tmpdir(), 'pc-'));
+  const calls = [];
+  let body = '<html>v1</html>';
+  const fetcher = async (url, v) => {
+    calls.push(v);
+    return { status: 200, finalUrl: url, headers: { 'content-type': 'text/html', etag: '"' + body.length + '"' }, body: Buffer.from(body) };
+  };
+  const c = new PageCache({ dir, homeUrl: 'https://shop.example.com/', fetcher });
+  const url = 'https://shop.example.com/a';
+  await c.fetchAndCache(url);
+  body = '<html>version-two</html>';
+  const r = await c.replaceFromNetwork(url);
+  assert.strictEqual(r.stored, true);
+  assert.strictEqual(calls[1].etag, '');
+  assert.strictEqual(c.read(url).body.toString(), '<html>version-two</html>');
+});
+
+test('replaceFromNetwork deletes the saved copy when the page is gone (404/410)', async () => {
+  const os = require('os'), fs2 = require('fs'), path2 = require('path');
+  const { PageCache } = require('../src/lib/offline-cache');
+  const dir = fs2.mkdtempSync(path2.join(os.tmpdir(), 'pc-'));
+  let status = 200;
+  const fetcher = async (url) => ({ status, finalUrl: url, headers: { 'content-type': 'text/html' }, body: Buffer.from('<html>x</html>') });
+  const c = new PageCache({ dir, homeUrl: 'https://shop.example.com/', fetcher });
+  const url = 'https://shop.example.com/gone';
+  await c.fetchAndCache(url);
+  assert.strictEqual(c.has(url), true);
+  status = 500;
+  await c.replaceFromNetwork(url);
+  assert.strictEqual(c.has(url), true); // server error keeps the old copy
+  status = 404;
+  const r = await c.replaceFromNetwork(url);
+  assert.strictEqual(r.removed, true);
+  assert.strictEqual(c.has(url), false);
+});

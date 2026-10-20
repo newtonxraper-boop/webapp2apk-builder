@@ -28,19 +28,6 @@
   #webviewHost webview { display: flex; }
   #webviewHost webview.bg { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }
 
-  /* ---- floating back / refresh / settings buttons ---- */
-  #fab { position: absolute; right: 14px; bottom: 14px; display: flex; flex-direction: column; gap: 8px; z-index: 30; }
-  #fab button { width: 40px; height: 40px; border-radius: 14px; border: 1px solid var(--line);
-    background: linear-gradient(160deg, rgba(40,44,54,.92), rgba(18,20,26,.92));
-    color: var(--text); font-size: 17px; cursor: pointer; backdrop-filter: blur(8px); box-shadow: 0 6px 16px rgba(0,0,0,.45);
-    transition: transform .18s cubic-bezier(.3,1.4,.5,1), background .2s, color .2s, box-shadow .2s, border-radius .2s; }
-  #fab button:hover:not(:disabled) { background: var(--accent); color: #04150a; transform: translateX(-4px); border-radius: 50%;
-    box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 50%, transparent); }
-  #fab button:active:not(:disabled) { transform: scale(.92); }
-  #fab button:disabled { opacity: .35; cursor: default; }
-  #fab button.busy { animation: pulse 1.2s ease-in-out infinite; }
-  @keyframes pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 25%, transparent); } }
-  #fab button.busy { border-color: var(--accent); color: var(--accent); }
   .dl-item { padding: 10px 0; border-bottom: 1px solid var(--line); }
   .dl-item .t { font-weight: 600; font-size: 14.5px; word-break: break-all; }
   .dl-item .s { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
@@ -127,6 +114,19 @@
   #tbDot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); flex: 0 0 auto; transition: background .3s, box-shadow .3s; }
   #tbDot.off { background: #b45309; box-shadow: 0 0 8px #b45309; }
   body.kiosk #titlebar { display: none; }
+  .i { width: 18px; height: 18px; display: block; }
+  .tbtn-group { display: flex; align-items: center; gap: 2px; -webkit-app-region: no-drag; flex: 0 0 auto; }
+  .tbtn { width: 30px; height: 28px; display: inline-flex; align-items: center; justify-content: center; border: none; border-radius: 8px;
+    background: transparent; color: var(--tb-fg, var(--text)); cursor: pointer; transition: background .15s, opacity .15s; -webkit-app-region: no-drag; }
+  .tbtn .i { width: 16px; height: 16px; }
+  .tbtn:hover:not(:disabled) { background: rgba(127,127,127,.22); }
+  .tbtn:active:not(:disabled) { background: rgba(127,127,127,.32); }
+  .tbtn:disabled { opacity: .3; cursor: default; }
+  .tbtn.busy { color: var(--accent); }
+  .tbtn.busy .i { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .tbtn:focus-visible, .btn:focus-visible, #tabbar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #tbNav { margin-right: 4px; }
 
   #loadbar { position: absolute; top: 0; left: 0; height: 3px; width: 0; z-index: 35; pointer-events: none; opacity: 0;
     background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 40%, #fff)); box-shadow: 0 0 10px var(--accent); }
@@ -168,11 +168,47 @@
   ::-webkit-scrollbar { width: 10px; height: 10px; }
   ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
   ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--accent) 60%, transparent); background-clip: padding-box; }
+
+  /* ================= calm, flat finish ================= */
+  #titlebar { background: var(--tb-bg, var(--bg)); color: var(--tb-fg, var(--text)); transition: background .25s, color .25s; }
+  #tbTitle { color: var(--tb-fg, var(--muted)); opacity: .65; }
+  #tbName { color: var(--tb-fg, var(--text)); }
+  #titlebar img { box-shadow: none; }
+  #tbDot { box-shadow: none; width: 7px; height: 7px; }
+  #tbDot.off { box-shadow: none; }
+  #tabbar { background: var(--bg); padding: 6px 12px 8px; border-top: 1px solid var(--line); gap: 6px; }
+  #tabbar button { background: transparent; border: 1px solid transparent; border-radius: 10px; box-shadow: none; padding: 7px 6px 6px; max-width: 150px; }
+  #tabbar button:hover { transform: none; background: rgba(255,255,255,.06); border-color: transparent; box-shadow: none; }
+  #tabbar button:hover .ic { transform: none; }
+  #tabbar button:active { transform: none; background: rgba(255,255,255,.1); }
+  #tabbar button.active { background: color-mix(in srgb, var(--accent) 16%, transparent); border-color: transparent; box-shadow: none; color: var(--text); }
+  #tabbar button.active::after { display: none; }
+  #tabbar .ic { display: inline-flex; align-items: center; justify-content: center; height: 20px; }
+  #tabbar button.active .ic { color: var(--accent); }
+  #tabbar .lb { font-size: 11px; letter-spacing: 0; }
+  #webviewHost webview:not(.bg) { animation: none; }
+  #loadbar { background: var(--accent); box-shadow: none; height: 2px; }
+  #splash img { animation: splashIn .5s ease-out both; box-shadow: none; }
+  .overlay { backdrop-filter: none; background: rgba(5,7,10,.55); }
+  .card { background: var(--panel); border-radius: 14px; box-shadow: 0 16px 40px rgba(0,0,0,.45); border: 1px solid var(--line); }
+  .overlay.show .card { animation: cardIn .16s ease-out; }
+  .card h2 button { border-radius: 8px; }
+  .card h2 button:hover { background: rgba(255,255,255,.1); color: var(--text); }
+  .row, .dl-item { background: transparent; border: none; border-top: 1px solid var(--line); border-radius: 0; margin: 0; padding: 12px 2px; }
+  .row:first-of-type { border-top: none; }
+  .row:hover { background: transparent; border-color: var(--line); }
+  .row .rowic { background: transparent; color: var(--muted); width: 22px; height: 22px; margin-right: 12px; border-radius: 0; }
+  .row .rowic .i { width: 18px; height: 18px; }
+  .btn:hover:not([disabled]) { transform: none; box-shadow: none; filter: brightness(1.08); }
+  .switch input:checked + .slider { box-shadow: none; }
+  .dl-bar span { background: var(--accent); }
+  select#saverSelect { outline-color: var(--accent); }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.28); background-clip: padding-box; }
 </style>
 </head>
 <body>
 <div id="app">
-  <div id="titlebar"><img src="icon.png" alt="" onerror="this.style.display='none'"><span id="tbName"></span><span id="tbSep">&middot;</span><span id="tbTitle"></span><span id="tbDot" title="Connection"></span></div>
+  <div id="titlebar"><div class="tbtn-group" id="tbNav"><button type="button" class="tbtn" id="backBtn" title="Back" aria-label="Back" disabled><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></button><button type="button" class="tbtn" id="fwdBtn" title="Forward" aria-label="Forward" disabled><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg></button><button type="button" class="tbtn" id="refreshBtn" title="Refresh" aria-label="Refresh"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></button></div><img src="icon.png" alt="" onerror="this.style.display='none'"><span id="tbName"></span><span id="tbSep">&middot;</span><span id="tbTitle"></span><span id="tbDot" title="Connection"></span><div class="tbtn-group" id="tbActions"><button type="button" class="tbtn" id="dlBtn" title="Downloads" aria-label="Downloads" style="display:none"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></button><button type="button" class="tbtn" id="settingsBtn" title="Settings" aria-label="Settings"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button></div></div>
   <div id="offlineBanner" class="banner">No internet connection &middot; click to retry</div>
   <div id="updateBanner" class="banner">A new version is available - click to download</div>
   <div id="slowBanner" class="banner"><span id="slowText"></span><button type="button" id="slowSaverBtn">Turn on Data saver</button></div>
@@ -181,13 +217,6 @@
   <div id="content-wrap">
     <div id="loadbar"></div>
     <div id="webviewHost"></div>
-    <div id="fab">
-      <button type="button" id="backBtn" title="Back" aria-label="Back" disabled>&#8592;</button>
-      <button type="button" id="fwdBtn" title="Forward" aria-label="Forward" disabled>&#8594;</button>
-      <button type="button" id="dlBtn" title="Downloads" aria-label="Downloads" style="display:none">&#11015;</button>
-      <button type="button" id="refreshBtn" title="Refresh">&#8635;</button>
-      <button type="button" id="settingsBtn" title="Settings">&#9881;</button>
-    </div>
   </div>
 
   <div id="tabbar"></div>
@@ -362,6 +391,32 @@
       return a === b || b.endsWith('.' + a) || a.endsWith('.' + b);
     } catch (e) { return true; }
   }
+
+  // ---------------------------------------------------------- site colour -> title bar
+  function lum(hex) { const n = parseInt(hex.slice(1), 16); const f = (c) => { c /= 255; return c <= .03928 ? c / 12.92 : Math.pow((c + .055) / 1.055, 2.4); };
+    return .2126 * f(n >> 16) + .7152 * f((n >> 8) & 255) + .0722 * f(n & 255); }
+  function toHex(c) {
+    if (!c) return null; c = String(c).trim();
+    let m = /^#([0-9a-f]{3})$/i.exec(c); if (m) return '#' + m[1].split('').map((x) => x + x).join('').toLowerCase();
+    if (/^#[0-9a-f]{6}$/i.test(c)) return c.toLowerCase();
+    m = /^rgba?\((\d+)[ ,]+(\d+)[ ,]+(\d+)(?:[ ,/]+([\d.]+))?\)$/i.exec(c);
+    if (m && (m[4] === undefined || parseFloat(m[4]) > .9)) return '#' + [m[1], m[2], m[3]].map((x) => Math.min(255, +x).toString(16).padStart(2, '0')).join('');
+    return null;
+  }
+  function applyChrome(bg) {
+    const root = document.documentElement.style;
+    if (!bg) { root.removeProperty('--tb-bg'); root.removeProperty('--tb-fg'); api.invoke('set-titlebar-color', '#12151b', '#e8eaed'); return; }
+    const fg = lum(bg) > .45 ? '#1f2328' : '#e8eaed';
+    root.setProperty('--tb-bg', bg); root.setProperty('--tb-fg', fg);
+    api.invoke('set-titlebar-color', bg, fg);
+  }
+  async function syncChrome(page) {
+    if (!page || pages[pos] !== page) return;
+    try {
+      const c = await page.wv.executeJavaScript(`(function(){var m=document.querySelector('meta[name="theme-color"]');var v=m&&m.content;if(!v){var b=getComputedStyle(document.body||document.documentElement).backgroundColor;if(!b||/rgba\\(.*,\\s*0\\)|transparent/.test(b))b=getComputedStyle(document.documentElement).backgroundColor;v=b}return v||''})()`);
+      if (pages[pos] === page) applyChrome(toHex(c));
+    } catch (_) {}
+  }
   // ---------------------------------------------------------- kept-alive pages
   // Every page you open stays alive in the background (up to MAX_PAGES), so
   // Back/Forward just switch to it - nothing reloads, scroll and forms stay put.
@@ -389,6 +444,7 @@
     if (cfg && cfg.nav_items.length) renderTabs();
     activateGuest(p);
     syncNav();
+    syncChrome(p);
   }
   function destroyPage(p) { try { p.wv.remove(); } catch (_) {} }
   function createPage(url, first) {
@@ -402,7 +458,7 @@
     wv.addEventListener('did-start-loading', () => { if (pages[pos] === page) loadBar(true); });
     wv.addEventListener('did-stop-loading', () => { if (pages[pos] === page) loadBar(false); });
     wv.addEventListener('dom-ready', () => { hideSplash(); if (pages[pos] === page) activateGuest(page); });
-    wv.addEventListener('did-stop-loading', () => { hideSplash(); if (pages[pos] === page) syncNav(); });
+    wv.addEventListener('did-stop-loading', () => { hideSplash(); if (pages[pos] === page) { syncNav(); syncChrome(page); } });
     wv.addEventListener('did-fail-load', hideSplash);
     const track = (e) => {
       if (e.url && /^https?:/i.test(e.url) && (e.isMainFrame === undefined || e.isMainFrame)) {
@@ -630,17 +686,18 @@
   }
 
   // ---------------------------------------------------------- settings
+  const SV = (p) => '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + p + '</svg>';
   const ROW_ICONS = [
-    [/app lock|pin/i, '\uD83D\uDD12'], [/kiosk/i, '\uD83D\uDDA5\uFE0F'], [/open when|starts/i, '\uD83D\uDE80'], [/data saver/i, '\uD83D\uDCF6'],
-    [/background/i, '\uD83D\uDD04'], [/notification/i, '\uD83D\uDD14'], [/sync|offline/i, '\u2601\uFE0F'], [/storage|cache/i, '\uD83D\uDCBE'],
-    [/login|password|saved/i, '\uD83D\uDD11'], [/update|version/i, '\u2B06\uFE0F'], [/privacy/i, '\uD83D\uDEE1\uFE0F'],
+    [/app lock|pin/i, SV('<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>')], [/kiosk/i, SV('<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>')], [/open when|starts/i, SV('<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>')], [/data saver/i, SV('<path d="M4 20v-4M10 20v-8M16 20V8M22 20V4"/>')],
+    [/background/i, SV('<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M12 8v4l3 2"/>')], [/notification/i, SV('<path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/>')], [/sync|offline/i, SV('<path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.8A6 6 0 0 0 4.6 12 3.5 3.5 0 0 0 6 19z"/>')], [/storage|cache/i, SV('<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>')],
+    [/login|password|saved/i, SV('<circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 20 3M16 7l3 3"/>')], [/update/i, SV('<path d="M12 19V5M5 12l7-7 7 7"/>')], [/about|version|connection|pages|images|last saved|waiting/i, SV('<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>')],
   ];
   function decorateRows() {
     document.querySelectorAll('#settingsOverlay .row .t, #osOverlay .row .t').forEach((t) => {
       if (t.querySelector('.rowic')) return;
       const hit = ROW_ICONS.find((r) => r[0].test(t.textContent));
       if (!hit) return;
-      const ic = document.createElement('span'); ic.className = 'rowic'; ic.textContent = hit[1];
+      const ic = document.createElement('span'); ic.className = 'rowic'; ic.innerHTML = hit[1];
       t.insertBefore(ic, t.firstChild);
     });
   }
