@@ -218,6 +218,38 @@ test('back online: the queue is replayed to the site and the shell is told', asy
   assert.ok(shellMsgs.filter((m) => m[0] === 'shell:state').pop()[1].queueSize === 0);
 });
 
+test('poor connection: online but the page times out -> saved copy is shown instead of a blank page', async () => {
+  const keepNet = netBehavior;
+  netBehavior = () => ({ status: 200, headers: {} }); // the reachability probe still gets through
+  try {
+  osState.online = true;
+  const guest = new WC('webview');
+  electronMock.app.emit('web-contents-created', {}, guest);
+  guest.emit('did-fail-load', {}, -118, 'ERR_CONNECTION_TIMED_OUT', HOME + 'orders', true);
+  await wait(250);
+  assert.strictEqual(guest.loaded.length, 1, 'something is put on screen');
+  assert.match(Buffer.from(guest.loaded[0].url.split(',')[1], 'base64').toString(), /CACHED ORDERS/);
+  assert.strictEqual(guest.loaded[0].opts.baseURLForDataURL, HOME + 'orders');
+  const toasts = FakeWindow.last.webContents.sent.filter((m) => m[0] === 'shell:toast').map((m) => m[1]);
+  assert.ok(toasts.some((t) => /Slow connection/.test(t)), 'the person is told what is happening');
+  } finally { netBehavior = keepNet; }
+});
+
+test('poor connection + nothing saved -> the branded page, never blank; other sites are left alone', async () => {
+  const keepNet = netBehavior;
+  netBehavior = () => ({ status: 200, headers: {} });
+  try {
+  osState.online = true;
+  const guest = new WC('webview');
+  electronMock.app.emit('web-contents-created', {}, guest);
+  guest.emit('did-fail-load', {}, -7, 'ERR_TIMED_OUT', HOME + 'never-saved', true);
+  guest.emit('did-fail-load', {}, -7, 'ERR_TIMED_OUT', 'https://some-other-site.example/x', true);
+  await wait(250);
+  assert.strictEqual(guest.loaded.length, 1);
+  assert.ok(guest.loaded[0].file && guest.loaded[0].file.endsWith('offline.html'));
+  } finally { netBehavior = keepNet; }
+});
+
 test('features left out of the build are inert and hidden from settings', async () => {
   const call = (name, arg) => ipcHandlers['shell:invoke']({ sender: FakeWindow.last.webContents }, name, arg);
   // default config has app lock and kiosk switched off

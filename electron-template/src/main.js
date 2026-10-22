@@ -94,6 +94,9 @@ const state = {
   pendingCredentials: null,
   skipAutoLoginOnce: false,
   prefetchDone: false,
+  poorRetryTimer: null,
+  poorRetryCount: 0,
+  poorRetryUrl: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -326,6 +329,47 @@ async function showOfflineFallback(contents, failedUrl) {
       query: { primary: config.primary_color, accent: config.accent_color, name: config.app_name },
     });
   } catch (e) { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// poor (not dead) connection: a page that times out or resets although the
+// computer is online and the server answered the probe. Inside a <webview>
+// Chromium draws nothing for a failed main-frame load, which is the blank
+// black page people saw on slow internet. Instead: show the saved copy (or the
+// branded page) straight away and keep retrying the live page quietly, with
+// growing gaps, so it swaps in by itself as soon as the connection copes.
+// ---------------------------------------------------------------------------
+const POOR_RETRY_MS = [2500, 5000, 10000, 20000, 30000, 45000];
+
+function clearPoorRetry() {
+  clearTimeout(state.poorRetryTimer);
+  state.poorRetryTimer = null;
+  state.poorRetryCount = 0;
+  state.poorRetryUrl = null;
+}
+
+async function showPoorConnectionFallback(contents, url) {
+  const first = state.poorRetryUrl !== url;
+  if (first) { state.poorRetryCount = 0; state.poorRetryUrl = url; }
+  await showOfflineFallback(contents, url);
+  if (first) toast('Slow connection - showing what is saved and retrying...');
+  schedulePoorRetry(contents, url);
+}
+
+function schedulePoorRetry(contents, url) {
+  clearTimeout(state.poorRetryTimer);
+  const n = state.poorRetryCount;
+  if (n >= POOR_RETRY_MS.length) return; // stop quietly; the person can still press Refresh
+  state.poorRetryTimer = setTimeout(() => {
+    state.poorRetryTimer = null;
+    if (!isLive(contents) || !isOnline()) return;
+    const stillShowing = (state.view === 'cached' && state.showingCachedFor === url)
+      || (state.view === 'offline-page' && state.lastCacheMissUrl === url);
+    if (!stillShowing) return; // the person already went somewhere else
+    state.poorRetryCount = n + 1;
+    contents.loadURL(url).catch(() => {});
+  }, POOR_RETRY_MS[n]);
+  if (state.poorRetryTimer.unref) state.poorRetryTimer.unref();
 }
 
 async function attemptRealRefresh() {
@@ -948,9 +992,10 @@ function attachGuestHandlers(contents) {
     // every normal click.
     if (!isMainFrame || code === -3 || !isHttpUrl(url) || !isNetworkErrorCode(code)) return;
     if (isOnline() && connectivity) await connectivity.reportLoadFailure();
-    if (!isOnline()) showOfflineFallback(contents, url);
-    // else: the network is fine - it's a real, different problem (leave
-    // Chromium's own error page in place).
+    if (!isOnline()) { showOfflineFallback(contents, url); return; }
+    // Online, but this load still failed (timeout / reset / flaky DNS) - the
+    // classic poor-connection case. Never leave a blank page behind.
+    if (sameHost(url, config.app_url)) showPoorConnectionFallback(contents, url);
   });
 
   // ---- faster start: if the live site is slow to answer on launch, show the
@@ -959,7 +1004,7 @@ function attachGuestHandlers(contents) {
   contents.on('did-start-loading', () => {
     loadStartedAt = Date.now();
     if (state.startupDone || state.startupTimer) return;
-    const wait = store && store.get('last_net_slow', false) ? 1200 : 3000;
+    const wait = store && store.get('last_net_slow', false) ? 700 : 1800;
     state.startupTimer = setTimeout(() => {
       state.startupTimer = null;
       if (state.startupDone || !isLive(contents)) return;
@@ -990,6 +1035,7 @@ function attachGuestHandlers(contents) {
       clearTimeout(state.startupTimer);
       state.startupTimer = null;
       state.startupSnapshot = false;
+      clearPoorRetry();
     }
   });
   contents.on('did-stop-loading', () => {
@@ -1544,6 +1590,12 @@ function setupSession() {
       });
     }
   } catch (e) { /* never block startup over this */ }
+
+  // Warm up DNS + TCP + TLS to the site now, so the first page does not pay for
+  // them on a slow link (a few hundred ms each on a poor connection).
+  try {
+    if (ses.preconnect && isHttpUrl(config.app_url)) ses.preconnect({ url: config.app_url, numSockets: 4 });
+  } catch (e) { /* purely an optimisation */ }
 
   const allowed = (permission) => {
     if (permission === 'media') return !!config.filecamera_enabled;

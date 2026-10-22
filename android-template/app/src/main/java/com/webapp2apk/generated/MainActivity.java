@@ -2123,6 +2123,7 @@ public class MainActivity extends AppCompatActivity {
     private void setupShareButton() {
         shareButton.setOnClickListener(v -> {
             v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+            spinIcon(v, 450);
             String url = webView.getUrl();
             if (url == null || url.startsWith("file:///android_asset/")) url = homeUrl;
             String title = webView.getTitle();
@@ -2142,6 +2143,7 @@ public class MainActivity extends AppCompatActivity {
     private void setupRefreshButton() {
         refreshButton.setOnClickListener(v -> {
             v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+            spinIcon(v, 600);
             attemptRealRefresh();
         });
 
@@ -2151,6 +2153,7 @@ public class MainActivity extends AppCompatActivity {
     private void setupSettingsButton() {
         settingsButton.setOnClickListener(v -> {
             v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+            spinIcon(v, 700);
             startActivity(new Intent(this, SettingsActivity.class));
         });
 
@@ -2158,6 +2161,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void makeDraggable(View view, String prefsKeyPrefix) {
+        applyFloatingStyle(view);
         if (prefs.contains(prefsKeyPrefix + "_x")) {
             view.post(() -> {
                 float x = prefs.getFloat(prefsKeyPrefix + "_x", view.getX());
@@ -2203,21 +2207,79 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 case MotionEvent.ACTION_UP:
-                    v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
                     if (isDragging[0]) {
+                        v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
                         prefs.edit()
                                 .putFloat(prefsKeyPrefix + "_x", v.getX())
                                 .putFloat(prefsKeyPrefix + "_y", v.getY())
                                 .apply();
                     } else {
+                        playClickEffect(v);
                         v.performClick();
                     }
+                    return true;
+
+                case MotionEvent.ACTION_CANCEL:
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
                     return true;
 
                 default:
                     return false;
             }
         });
+    }
+
+    /** Coloured glow + readable icon colour for the floating buttons (colours come from build.php). */
+    private void applyFloatingStyle(View v) {
+        v.setElevation(dpToPx(10));
+        if (Build.VERSION.SDK_INT >= 28) {
+            int accent = ContextCompat.getColor(this, R.color.accent_color);
+            v.setOutlineSpotShadowColor(accent);
+            v.setOutlineAmbientShadowColor(accent);
+        }
+        if (v instanceof android.widget.TextView) {
+            double lum = (androidx.core.graphics.ColorUtils.calculateLuminance(ContextCompat.getColor(this, R.color.primary_color))
+                    + androidx.core.graphics.ColorUtils.calculateLuminance(ContextCompat.getColor(this, R.color.accent_color))) / 2.0;
+            ((android.widget.TextView) v).setTextColor(lum > 0.5 ? Color.parseColor("#04150A") : Color.WHITE);
+        }
+    }
+
+    /** Springy "pop" plus an expanding ring in the accent colour when a floating button is tapped. */
+    private void playClickEffect(final View v) {
+        v.animate().cancel();
+        v.animate().scaleX(1f).scaleY(1f).setDuration(340)
+                .setInterpolator(new android.view.animation.OvershootInterpolator(4f)).start();
+
+        if (!v.isEnabled() || !(v.getParent() instanceof android.view.ViewGroup)) return;
+        final android.view.ViewGroup parent = (android.view.ViewGroup) v.getParent();
+        final GradientDrawable ring = new GradientDrawable();
+        ring.setShape(GradientDrawable.OVAL);
+        ring.setColor(Color.TRANSPARENT);
+        ring.setStroke(dpToPx(3), ContextCompat.getColor(this, R.color.accent_color));
+        final int cx = (int) (v.getX() + v.getWidth() / 2f);
+        final int cy = (int) (v.getY() + v.getHeight() / 2f);
+        final int base = v.getWidth() / 2;
+        parent.getOverlay().add(ring);
+
+        android.animation.ValueAnimator ringAnim = android.animation.ValueAnimator.ofFloat(0f, 1f);
+        ringAnim.setDuration(460);
+        ringAnim.addUpdateListener(a -> {
+            float f = (float) a.getAnimatedValue();
+            int r = (int) (base * (1f + 0.9f * f));
+            ring.setBounds(cx - r, cy - r, cx + r, cy + r);
+            ring.setAlpha((int) (200 * (1f - f)));
+        });
+        ringAnim.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(android.animation.Animator animation) {
+                parent.getOverlay().remove(ring);
+            }
+        });
+        ringAnim.start();
+    }
+
+    /** Little icon flourish (a full spin) used by the share / reload / settings buttons. */
+    private void spinIcon(View v, long ms) {
+        android.animation.ObjectAnimator.ofFloat(v, View.ROTATION, 0f, 360f).setDuration(ms).start();
     }
 
     private boolean openExternally(Uri uri) {

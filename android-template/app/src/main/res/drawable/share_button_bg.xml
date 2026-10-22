@@ -1,9 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Floating round button: gradient from the primary to the accent colour chosen in build.php,
+     a soft gloss on top and a thin light rim. Colours come from @color/primary_color / accent_color. -->
 <ripple xmlns:android="http://schemas.android.com/apk/res/android"
-    android:color="#33FFFFFF">
+    android:color="#66FFFFFF">
     <item>
-        <shape android:shape="oval">
-            <solid android:color="@color/accent_color" />
-        </shape>
+        <layer-list>
+            <item>
+                <shape android:shape="oval">
+                    <gradient
+                        android:angle="135"
+                        android:startColor="@color/primary_color"
+                        android:endColor="@color/accent_color" />
+                </shape>
+            </item>
+            <item>
+                <shape android:shape="oval">
+                    <gradient
+                        android:angle="270"
+                        android:startColor="#59FFFFFF"
+                        android:centerColor="#10FFFFFF"
+                        android:endColor="#00FFFFFF" />
+                </shape>
+            </item>
+            <item>
+                <shape android:shape="oval">
+                    <stroke android:width="1.5dp" android:color="#59FFFFFF" />
+                </shape>
+            </item>
+        </layer-list>
     </item>
 </ripple>
