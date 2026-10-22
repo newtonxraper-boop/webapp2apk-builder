@@ -142,6 +142,42 @@
             android:contentDescription="Reload page" />
 
         <TextView
+            android:id="@+id/backNavButton"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_gravity="bottom|start"
+            android:layout_marginStart="16dp"
+            android:layout_marginBottom="16dp"
+            android:background="@drawable/share_button_bg"
+            android:text="&#8592;"
+            android:textColor="#FFFFFF"
+            android:textSize="20sp"
+            android:gravity="center"
+            android:elevation="10dp"
+            android:alpha="0.35"
+            android:clickable="true"
+            android:focusable="true"
+            android:contentDescription="Back" />
+
+        <TextView
+            android:id="@+id/forwardNavButton"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_gravity="bottom|start"
+            android:layout_marginStart="68dp"
+            android:layout_marginBottom="16dp"
+            android:background="@drawable/share_button_bg"
+            android:text="&#8594;"
+            android:textColor="#FFFFFF"
+            android:textSize="20sp"
+            android:gravity="center"
+            android:elevation="10dp"
+            android:alpha="0.35"
+            android:clickable="true"
+            android:focusable="true"
+            android:contentDescription="Forward" />
+
+        <TextView
             android:id="@+id/settingsButton"
             android:layout_width="44dp"
             android:layout_height="44dp"

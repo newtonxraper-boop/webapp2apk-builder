@@ -28,6 +28,15 @@ public class App extends Application {
 
     private int startedActivityCount = 0;
 
+    // True while any of the app's activities is on screen. Read from
+    // background workers and receivers (update install, notifications) to
+    // know whether the person is using the app right now.
+    private static volatile boolean inForeground = false;
+
+    public static boolean isInForeground() {
+        return inForeground;
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -53,6 +62,8 @@ public class App extends Application {
         @Override
         public void onActivityStarted(android.app.Activity activity) {
             startedActivityCount++;
+            inForeground = true;
+            UpdateWorker.cancelInstallSoon(getApplicationContext());
         }
 
         @Override
@@ -60,6 +71,10 @@ public class App extends Application {
             startedActivityCount = Math.max(0, startedActivityCount - 1);
             if (startedActivityCount == 0) {
                 sessionUnlocked = false;
+                inForeground = false;
+                // App left the screen: if an update is already downloaded,
+                // install it shortly (like the desktop app on close).
+                UpdateWorker.scheduleInstallSoon(getApplicationContext());
             }
         }
 

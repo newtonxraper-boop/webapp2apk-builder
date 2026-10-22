@@ -188,7 +188,15 @@ async function main() {
     .split('{{APP_NAME}}').join(esc(appName))
     .split('{{PACKAGE_NAME}}').join(esc(packageName))
     .split('{{PACKAGE_SLUG}}').join(esc(packageSlug));
-  JSON.parse(pkg); // fail the build here, loudly, rather than deep inside electron-builder
+  const parsedPkg = JSON.parse(pkg); // fail the build here, loudly, rather than deep inside electron-builder
+  // Version people see (installer, Add/Remove Programs, About): the website raises it
+  // with every rebuild of the same app, so it continues from the app made before.
+  const appVersion = env('APP_VERSION', '').trim();
+  if (/^\d{1,4}\.\d{1,4}\.\d{1,4}$/.test(appVersion)) {
+    parsedPkg.version = appVersion;
+    pkg = JSON.stringify(parsedPkg, null, 2) + '\n';
+    console.log(`App version: ${appVersion}`);
+  }
   fs.writeFileSync(PACKAGE_JSON, pkg, 'utf8');
 
   const iconApplied = await processIcon(iconUrl);

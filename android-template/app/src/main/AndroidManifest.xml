@@ -19,6 +19,16 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Lets an update that this app installs itself go through without a
+         confirmation screen on Android 12+ (once the app is its own
+         installer of record). Older versions simply ignore it. -->
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
+    <!-- "Stay active in background": a foreground service keeps the app alive
+         when it is not on screen (see KeepAliveService). BOOT_COMPLETED
+         brings it back after a restart or after an update was installed. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <!-- NFC tap bridge (window.AndroidNfc). NFC is a normal-protection-level
          permission - Android never shows a runtime prompt for it, it's only
@@ -145,6 +155,30 @@
         <receiver
             android:name="com.webapp2apk.generated.GeofenceBroadcastReceiver"
             android:exported="false" />
+
+        <service
+            android:name="com.webapp2apk.generated.KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the web app running so messages, reminders and sync still work when it is not on screen" />
+        </service>
+
+        <!-- Result of a self-update install (PackageInstaller). -->
+        <receiver
+            android:name="com.webapp2apk.generated.UpdateInstallReceiver"
+            android:exported="false" />
+
+        <!-- Restores background mode + schedules after reboot / app update. -->
+        <receiver
+            android:name="com.webapp2apk.generated.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"

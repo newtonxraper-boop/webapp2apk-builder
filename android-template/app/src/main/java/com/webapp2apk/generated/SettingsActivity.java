@@ -48,6 +48,7 @@ public class SettingsActivity extends AppCompatActivity {
         setupNotificationsRow();
         setupSyncRow();
         setupClearCacheRow();
+        setupUpdateRows();
         setupBatteryOptimizationRow();
         setupLanguageRow();
         setupVersionText();
@@ -62,6 +63,25 @@ public class SettingsActivity extends AppCompatActivity {
         // Also reflect a battery-exemption grant made while the person was
         // over in system Settings, in case they backed out to here after.
         refreshBatteryOptimizationStatus();
+    }
+
+    private void setupUpdateRows() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+
+        Switch autoUpdate = findViewById(R.id.autoUpdateSwitch);
+        autoUpdate.setChecked(UpdateManager.isAutoUpdateEnabled(this));
+        autoUpdate.setOnCheckedChangeListener((button, checked) ->
+                prefs.edit().putBoolean(UpdateManager.K_AUTO_UPDATE, checked).apply());
+
+        Switch mobileData = findViewById(R.id.updateMobileDataSwitch);
+        mobileData.setChecked(UpdateManager.isMeteredAllowed(this));
+        mobileData.setOnCheckedChangeListener((button, checked) ->
+                prefs.edit().putBoolean(UpdateManager.K_ALLOW_METERED, checked).apply());
+
+        Switch background = findViewById(R.id.backgroundModeSwitch);
+        background.setChecked(KeepAliveService.isEnabled(this));
+        background.setOnCheckedChangeListener((button, checked) ->
+                KeepAliveService.setEnabled(this, checked));
     }
 
     private void setupKioskModeRow() {
@@ -223,6 +243,12 @@ public class SettingsActivity extends AppCompatActivity {
             File[] files = cacheDir.listFiles();
             if (files != null) {
                 for (File f : files) {
+                    f.delete();
+                }
+            }
+            File[] assetFiles = new File(getFilesDir(), "webassets").listFiles();
+            if (assetFiles != null) {
+                for (File f : assetFiles) {
                     f.delete();
                 }
             }

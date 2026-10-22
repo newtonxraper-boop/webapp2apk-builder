@@ -55,6 +55,18 @@ on:
         description: 'Optional URL to POST crash reports to (leave blank to disable)'
         required: false
         default: ''
+      update_check_url:
+        description: 'Build-site URL the app asks for newer builds of itself (same one the desktop build uses). Blank = use <app site>/version.json'
+        required: false
+        default: ''
+      app_version:
+        description: 'Version shown to people, e.g. 1.0.3 (the website raises it with every rebuild of the same app). Blank = 1.0'
+        required: false
+        default: ''
+      background_enabled:
+        description: "'true' or 'false' - keep the app running in the background by default (user can toggle in Settings)"
+        required: false
+        default: 'true'
       privacy_policy_url:
         description: 'Optional URL to a privacy policy, shown once on first launch (leave blank to disable)'
         required: false
@@ -92,6 +104,9 @@ jobs:
           NAV_ITEMS_B64: ${{ inputs.nav_items_b64 }}
           CRASH_REPORT_URL: ${{ inputs.crash_report_url }}
           PRIVACY_POLICY_URL: ${{ inputs.privacy_policy_url }}
+          UPDATE_CHECK_URL: ${{ inputs.update_check_url }}
+          BACKGROUND_ENABLED: ${{ inputs.background_enabled }}
+          APP_VERSION: ${{ inputs.app_version }}
         run: python3 scripts/generate_resources.py
 
       - name: Show generated config files (debug)
@@ -174,6 +189,28 @@ jobs:
         run: |
           cd android-template
           gradle assembleRelease --stacktrace
+
+      - name: Show which key signed the APK
+        continue-on-error: true
+        run: |
+          APK=$(find android-template/app/build/outputs/apk/release -name '*.apk' | head -n1)
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner 2>/dev/null | sort | tail -n1)
+          CERT=""
+          if [ -n "$APKSIGNER" ] && [ -n "$APK" ]; then
+            CERT=$("$APKSIGNER" verify --print-certs "$APK" | grep -i "SHA-256 digest" | head -n1 | sed 's/.*: //')
+          fi
+          if [ -n "$KEYSTORE_PATH" ]; then
+            KIND="RELEASE key - this APK installs over older builds signed with the same key"
+          else
+            KIND="DEBUG fallback key - apps signed this way can NOT be updated by a build signed with the release key later (people would have to uninstall)"
+          fi
+          {
+            echo "### APK signing"
+            echo "- Key: $KIND"
+            echo "- Certificate SHA-256: \`$CERT\`"
+            echo "- Version: ${{ inputs.app_version }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$KIND"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

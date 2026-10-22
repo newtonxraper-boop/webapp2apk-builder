@@ -116,6 +116,16 @@ public class MainActivity extends AppCompatActivity {
     private View shareButton;
     private View refreshButton;
     private View settingsButton;
+    private View backNavButton;
+    private View forwardNavButton;
+
+    // Offline copy of the CSS/JS/images/fonts the pages load (see AssetCache).
+    private AssetCache assetCache;
+    private final java.util.Map<String, String> pendingAssets = new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile String currentPageUrl = "";
+    private volatile boolean currentPageSensitive = false;
+    private java.util.concurrent.ExecutorService assetExecutor;
+    private static final int MAX_PENDING_ASSETS = 300;
     private View syncPendingBanner;
     private TextView syncPendingText;
     private View syncPendingSendNowButton;
@@ -222,6 +232,8 @@ public class MainActivity extends AppCompatActivity {
         shareButton = findViewById(R.id.shareButton);
         refreshButton = findViewById(R.id.refreshButton);
         settingsButton = findViewById(R.id.settingsButton);
+        backNavButton = findViewById(R.id.backNavButton);
+        forwardNavButton = findViewById(R.id.forwardNavButton);
         syncPendingBanner = findViewById(R.id.syncPendingBanner);
         syncPendingText = findViewById(R.id.syncPendingText);
         syncPendingSendNowButton = findViewById(R.id.syncPendingSendNowButton);
@@ -254,6 +266,10 @@ public class MainActivity extends AppCompatActivity {
         if (!offlineCacheDir.exists()) offlineCacheDir.mkdirs();
         maxCacheBytes = computeCacheSizeLimit();
         prefs = getSharedPreferences("webapp2apk_prefs", MODE_PRIVATE);
+        assetCache = new AssetCache(new File(getFilesDir(), "webassets"),
+                Math.max(20L * 1024 * 1024, maxCacheBytes),
+                Uri.parse(homeUrl).getHost(),
+                url -> CookieManager.getInstance().getCookie(url));
 
         setupActivityResultLaunchers();
         setupBackHandling();
@@ -263,11 +279,14 @@ public class MainActivity extends AppCompatActivity {
         setupShareButton();
         setupRefreshButton();
         setupSettingsButton();
+        setupNavButtons();
         setupConnectivityBanner();
         setupBottomTabs();
         checkForAppUpdate();
         maybeShowLockScreen();
         PeriodicRefreshWorker.scheduleIfNeeded(getApplicationContext());
+        UpdateWorker.scheduleIfNeeded(getApplicationContext());
+        KeepAliveService.start(this);
 
         webView.loadUrl(startUrl);
     }
@@ -313,7 +332,11 @@ public class MainActivity extends AppCompatActivity {
         activeInstance = null;
         disableNfcForegroundDispatch();
         webView.onPause();
-        webView.pauseTimers();
+        // With background mode on, the page's own scripts (message polling,
+        // timers, notifications) keep running while the app is not on screen.
+        if (!KeepAliveService.isEnabled(this)) {
+            webView.pauseTimers();
+        }
         CookieManager.getInstance().flush();
         OfflineQueueWorker.scheduleIfNeeded(getApplicationContext());
         stopWebViewWatchdog();
@@ -328,6 +351,12 @@ public class MainActivity extends AppCompatActivity {
         maybeShowLockScreen();
         webView.onResume();
         webView.resumeTimers();
+        KeepAliveService.start(this);
+        refreshUpdateBanner();
+        // Android 13+ needs the person's OK before ANY notification (push,
+        // reminders, update-ready, background mode) can show. Ask once, a
+        // moment after the app is on screen.
+        webView.postDelayed(this::maybeAskNotificationPermission, 1500);
         watchdogMissedBeats = 0;
         startWebViewWatchdog();
         if (prefs != null) prefs.edit().putInt("unread_notification_count", 0).apply();
@@ -377,6 +406,12 @@ public class MainActivity extends AppCompatActivity {
         }
         if (refreshButton != null) {
             refreshButton.animate().cancel();
+        }
+        if (backNavButton != null) backNavButton.animate().cancel();
+        if (forwardNavButton != null) forwardNavButton.animate().cancel();
+        if (assetExecutor != null) {
+            assetExecutor.shutdownNow();
+            assetExecutor = null;
         }
         if (prefetchExecutor != null) {
             prefetchExecutor.shutdownNow();
@@ -546,7 +581,7 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                if (!request.isForMainFrame()) return null;
+                if (!request.isForMainFrame()) return handleSubresource(request);
                 return maybeServeFromOfflineCache(request);
             }
 
@@ -578,6 +613,12 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
+                currentPageUrl = url == null ? "" : url;
+                try {
+                    currentPageSensitive = url == null || isSensitiveUrl(Uri.parse(url));
+                } catch (Exception e) {
+                    currentPageSensitive = true;
+                }
                 progressBar.setVisibility(View.VISIBLE);
                 progressBarIcon.setVisibility(View.VISIBLE);
                 startProgressPulse();
@@ -588,6 +629,12 @@ public class MainActivity extends AppCompatActivity {
                     shortcutsRegistered = true;
                     setupHomeScreenShortcuts();
                 }
+            }
+
+            @Override
+            public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                super.doUpdateVisitedHistory(view, url, isReload);
+                updateNavButtons();
             }
 
             @Override
@@ -700,7 +747,11 @@ public class MainActivity extends AppCompatActivity {
 
                 if (isCurrentlyOnline && url != null) {
                     cachePageInBackground(url);
+                    // Save the page's CSS/JS/images shortly after it settles, so
+                    // late-loading files are included too.
+                    view.postDelayed(MainActivity.this::flushAssetsInBackground, 2500);
                 }
+                updateNavButtons();
 
                 cacheRetryInProgress = false;
             }
@@ -746,6 +797,90 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         });
+    }
+
+    /**
+     * Files a page loads besides its own HTML (CSS, scripts, images, fonts).
+     * Offline: serve the saved copy if there is one. Online: let WebView load
+     * the file as usual, and just note it so it can be saved afterwards.
+     * Runs on a WebView background thread - touches no views.
+     */
+    private WebResourceResponse handleSubresource(WebResourceRequest request) {
+        try {
+            if (!"GET".equalsIgnoreCase(request.getMethod())) return null;
+            Uri uri = request.getUrl();
+            String scheme = uri.getScheme();
+            if (scheme == null || !(scheme.equals("http") || scheme.equals("https"))) return null;
+            String url = uri.toString();
+
+            if (!isCurrentlyOnline) {
+                return assetCache != null ? assetCache.serve(url) : null;
+            }
+
+            if (currentPageSensitive || assetCache == null) return null;
+            if (pendingAssets.size() >= MAX_PENDING_ASSETS) return null;
+            if (AssetCache.looksStatic(url, request.getRequestHeaders())) {
+                pendingAssets.put(url, currentPageUrl);
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /** Downloads (once, then refreshed daily) the static files noted while the page loaded. */
+    private void flushAssetsInBackground() {
+        if (assetCache == null || pendingAssets.isEmpty() || !isCurrentlyOnline) return;
+        final java.util.Map<String, String> batch = new java.util.LinkedHashMap<>(pendingAssets);
+        pendingAssets.clear();
+
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        boolean metered = cm != null && androidx.core.net.ConnectivityManagerCompat.isActiveNetworkMetered(cm);
+        // keep mobile-data use small; Wi-Fi gets a bigger allowance
+        final AssetCache.Budget budget = metered
+                ? new AssetCache.Budget(80, 3L * 1024 * 1024)
+                : new AssetCache.Budget(150, 12L * 1024 * 1024);
+
+        if (assetExecutor == null || assetExecutor.isShutdown()) {
+            assetExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        }
+        try {
+            assetExecutor.submit(() -> {
+                try {
+                    assetCache.fetchAll(batch, budget);
+                } catch (Exception ignored) {
+                }
+            });
+        } catch (Exception ignored) {
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Back / Forward buttons (greyed out when there is nowhere to go)
+    // ------------------------------------------------------------------
+
+    private void setupNavButtons() {
+        if (backNavButton == null || forwardNavButton == null) return;
+        backNavButton.setOnClickListener(v -> {
+            v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+            if (webView.canGoBack()) webView.goBack();
+        });
+        forwardNavButton.setOnClickListener(v -> {
+            v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+            if (webView.canGoForward()) webView.goForward();
+        });
+        makeDraggable(backNavButton, "back_btn");
+        makeDraggable(forwardNavButton, "forward_btn");
+        updateNavButtons();
+    }
+
+    private void updateNavButtons() {
+        if (webView == null || backNavButton == null || forwardNavButton == null) return;
+        boolean canBack = webView.canGoBack();
+        boolean canForward = webView.canGoForward();
+        backNavButton.setEnabled(canBack);
+        backNavButton.setAlpha(canBack ? 1f : 0.35f);
+        forwardNavButton.setEnabled(canForward);
+        forwardNavButton.setAlpha(canForward ? 1f : 0.35f);
     }
 
     private WebResourceResponse maybeServeFromOfflineCache(WebResourceRequest request) {
@@ -2172,125 +2307,126 @@ public class MainActivity extends AppCompatActivity {
         return IconCompat.createWithAdaptiveBitmap(bitmap);
     }
 
+    // ------------------------------------------------------------------
+    // Self-update (see UpdateManager / UpdateWorker). The banner reflects the
+    // current state: downloading -> ready to install, or "available" when the
+    // download is waiting for Wi-Fi.
+    // ------------------------------------------------------------------
+
+    private volatile boolean updateDownloading = false;
+
+    private static final int REQ_POST_NOTIFICATIONS = 9002;
+
+    private void maybeAskNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33 || isFinishing() || isDestroyed()) return;
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return;
+        if (prefs.getBoolean("notif_permission_asked", false)) return; // never nag
+        prefs.edit().putBoolean("notif_permission_asked", true).apply();
+        try {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_POST_NOTIFICATIONS);
+        } catch (Exception ignored) {
+        }
+    }
+
     private void checkForAppUpdate() {
+        refreshUpdateBanner();
         long lastCheck = prefs.getLong("last_update_check", 0);
         if (System.currentTimeMillis() - lastCheck < UPDATE_CHECK_MIN_INTERVAL_MS) return;
-        prefs.edit().putLong("last_update_check", System.currentTimeMillis()).apply();
 
+        final android.content.Context app = getApplicationContext();
         new Thread(() -> {
             try {
-                Uri homeUri = Uri.parse(homeUrl);
-                String versionUrl = homeUri.getScheme() + "://" + homeUri.getHost() + "/version.json";
-
-                HttpURLConnection conn = (HttpURLConnection) new URL(versionUrl).openConnection();
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(5000);
-                int status = conn.getResponseCode();
-                if (status != 200) {
-                    conn.disconnect();
-                    return;
-                }
-
-                byte[] data = readAllBytes(conn.getInputStream());
-                conn.disconnect();
-                JSONObject versionInfo = new JSONObject(new String(data, "UTF-8"));
-
-                long latestVersionCode = versionInfo.optLong("version_code", -1);
-                String apkUrl = versionInfo.optString("apk_url", "");
-                if (latestVersionCode <= 0 || apkUrl.isEmpty()) return;
-
-                PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
-                long currentVersionCode = PackageInfoCompat.getLongVersionCode(packageInfo);
-
-                if (latestVersionCode > currentVersionCode) {
-                    runOnUiThread(() -> showUpdateBanner(apkUrl));
+                UpdateManager.Info info = UpdateManager.check(app);
+                runOnUiThread(this::refreshUpdateBanner);
+                if (info == null) return;
+                if (UpdateManager.getReadyFile(app) != null) return;
+                if (UpdateManager.isAutoUpdateEnabled(app) && UpdateManager.canAutoDownloadNow(app)) {
+                    startUpdateDownload(info);
                 }
             } catch (Exception ignored) {
             }
         }).start();
     }
 
-    private void showUpdateBanner(String apkUrl) {
-        updateBanner.setVisibility(View.VISIBLE);
-        updateBanner.setOnClickListener(v -> downloadAndInstallUpdate(apkUrl));
+    /** Shows the right banner for whatever state the update is in right now. */
+    private void refreshUpdateBanner() {
+        if (updateBanner == null) return;
+        if (updateDownloading) return; // the progress text is showing
+        if (UpdateManager.getReadyFile(this) != null) {
+            String readyName = UpdateManager.getReadyVersionName(this);
+            updateBanner.setText(readyName.isEmpty()
+                    ? "Update ready - tap to install"
+                    : "Update " + readyName + " ready - tap to install");
+            updateBanner.setVisibility(View.VISIBLE);
+            updateBanner.setOnClickListener(v -> installReadyUpdate());
+        } else if (UpdateManager.getAvailable(this) != null) {
+            UpdateManager.Info availInfo = UpdateManager.getAvailable(this);
+            updateBanner.setText(availInfo != null && !availInfo.versionName.isEmpty()
+                    ? "Version " + availInfo.versionName + " is available - tap to download"
+                    : "A new version is available - tap to download");
+            updateBanner.setVisibility(View.VISIBLE);
+            updateBanner.setOnClickListener(v -> {
+                UpdateManager.Info info = UpdateManager.getAvailable(this);
+                if (info != null) startUpdateDownload(info);
+            });
+        } else {
+            updateBanner.setVisibility(View.GONE);
+        }
     }
 
-    /**
-     * Downloads the new APK in the background via DownloadManager and hands
-     * it straight to the system installer when done - previously this just
-     * opened the APK's bare URL externally, which on most devices only
-     * opens a browser tab rather than actually installing anything.
-     */
-    private void downloadAndInstallUpdate(String apkUrl) {
+    private void startUpdateDownload(UpdateManager.Info info) {
+        if (updateDownloading) return;
+        updateDownloading = true;
+        final android.content.Context app = getApplicationContext();
+        runOnUiThread(() -> {
+            updateBanner.setText("Downloading update... 0%");
+            updateBanner.setVisibility(View.VISIBLE);
+            updateBanner.setOnClickListener(null);
+        });
+        new Thread(() -> {
+            boolean ok = false;
+            try {
+                UpdateManager.download(app, info, pct -> runOnUiThread(() ->
+                        updateBanner.setText("Downloading update... " + pct + "%")));
+                ok = true;
+            } catch (Exception e) {
+                // fall through - the banner goes back to "tap to download"
+            } finally {
+                updateDownloading = false;
+                final boolean finished = ok;
+                runOnUiThread(() -> {
+                    refreshUpdateBanner();
+                    if (!finished) showSnackbar("Update download failed - tap the banner to try again");
+                });
+            }
+        }).start();
+    }
+
+    private void installReadyUpdate() {
+        File apk = UpdateManager.getReadyFile(this);
+        if (apk == null) {
+            refreshUpdateBanner();
+            return;
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 && !getPackageManager().canRequestPackageInstalls()) {
-            // The person has to explicitly grant "install unknown apps" for
-            // this app once - Android requires this to be a deliberate,
-            // visible permission grant, it can't be requested silently.
+            // Android requires the person to deliberately allow "install
+            // unknown apps" for this app once - it can't be granted silently.
             Intent settingsIntent = new Intent(
                     android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                     Uri.parse("package:" + getPackageName()));
             try {
                 startActivity(settingsIntent);
-                showSnackbar("Allow installs from this app, then tap Update again");
+                showSnackbar("Allow installs from this app, then tap the update banner again");
             } catch (Exception e) {
                 showSnackbar("Could not open install-permission settings");
             }
             return;
         }
-
-        showSnackbar("Downloading update...");
-
-        DownloadManager.Request request = new DownloadManager.Request(Uri.parse(apkUrl));
-        request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, "update.apk");
-        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-        request.setTitle(getString(R.string.app_name) + " update");
-
-        DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
-        if (dm == null) {
-            showSnackbar("Could not start download");
-            return;
-        }
-        long expectedId = dm.enqueue(request);
-
-        android.content.BroadcastReceiver receiver = new android.content.BroadcastReceiver() {
-            @Override
-            public void onReceive(android.content.Context context, Intent intent) {
-                long completedId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
-                if (completedId != expectedId) return;
-                try {
-                    unregisterReceiver(this);
-                } catch (Exception ignored) {
-                }
-                installDownloadedUpdate();
-            }
-        };
-        android.content.IntentFilter filter = new android.content.IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(receiver, filter, RECEIVER_EXPORTED);
-        } else {
-            registerReceiver(receiver, filter);
-        }
-    }
-
-    private void installDownloadedUpdate() {
-        File apkFile = new File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "update.apk");
-        if (!apkFile.exists()) {
-            showSnackbar("Update download failed");
-            return;
-        }
-
-        Uri apkUri = androidx.core.content.FileProvider.getUriForFile(
-                this, getPackageName() + ".fileprovider", apkFile);
-
-        Intent installIntent = new Intent(Intent.ACTION_VIEW);
-        installIntent.setDataAndType(apkUri, "application/vnd.android.package-archive");
-        installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
-
         try {
-            startActivity(installIntent);
+            UpdateManager.install(this, apk);
         } catch (Exception e) {
-            showSnackbar("Could not open the installer");
+            showSnackbar("Could not start the update");
         }
     }
 

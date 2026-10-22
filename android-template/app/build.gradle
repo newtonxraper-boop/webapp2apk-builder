@@ -18,7 +18,7 @@ android {
         minSdk 23
         targetSdk 34
         versionCode {{VERSION_CODE}}
-        versionName "1.0"
+        versionName "{{VERSION_NAME}}"
         multiDexEnabled true
     }
 

@@ -231,11 +231,24 @@ def main():
     push_enabled = bool_literal("PUSH_ENABLED", False)
     filecamera_enabled = bool_literal("FILECAMERA_ENABLED", True)
     kiosk_enabled = bool_literal("KIOSK_ENABLED", False)
+    # "Stay active in background" default for this build (the person can still
+    # switch it off in the app's Settings screen).
+    background_enabled = bool_literal("BACKGROUND_ENABLED", True)
+    # Same build-site endpoint the desktop app uses for update checks
+    # (called with platform=android). Blank = fall back to <site>/version.json.
+    update_check_url = os.environ.get("UPDATE_CHECK_URL", "").strip().replace('"', "")
+    if not update_check_url.lower().startswith(("http://", "https://")):
+        update_check_url = ""
 
     # A Unix timestamp is always higher than the previous build's, which is
     # exactly what versionCode needs to be for Android's own update-comparison
     # rules, and for the app's own in-app "a newer version exists" check.
     version_code = str(int(time.time()))
+    # User-visible version (1.0.N). The website numbers each rebuild of the same
+    # app, so it carries on from the app made before. Blank/invalid -> "1.0".
+    version_name = os.environ.get("APP_VERSION", "").strip()
+    if not re.fullmatch(r"\d{1,4}(\.\d{1,4}){1,3}", version_name):
+        version_name = "1.0"
 
     # Firebase config is optional. If not supplied, we deliberately LEAVE the
     # {{FIREBASE_*}} placeholders in strings.xml untouched - App.java checks
@@ -260,7 +273,10 @@ def main():
         "{{PUSH_ENABLED}}": push_enabled,
         "{{FILECAMERA_ENABLED}}": filecamera_enabled,
         "{{KIOSK_ENABLED}}": kiosk_enabled,
+        "{{BACKGROUND_ENABLED}}": background_enabled,
+        "{{UPDATE_CHECK_URL}}": update_check_url,
         "{{VERSION_CODE}}": version_code,
+        "{{VERSION_NAME}}": version_name,
         # Both optional and empty by default - most target web apps won't
         # have a crash_report.php endpoint or a dedicated privacy policy
         # page, so leaving these blank must be a safe, silent no-op on the
@@ -304,6 +320,7 @@ def main():
     print(f"App name: {app_name}")
     print(f"App URL: {app_url}")
     print(f"Package name (applicationId): {package_name}")
+    print(f"Version: {version_name} (versionCode {version_code})")
     print(f"Primary color: {primary_color}  Primary dark: {primary_dark_color}  Accent: {accent_color}")
     print(f"splash_enabled={splash_enabled} push_enabled={push_enabled} filecamera_enabled={filecamera_enabled} kiosk_enabled={kiosk_enabled}")
     print(f"Nav tabs: {nav_tab_count}")

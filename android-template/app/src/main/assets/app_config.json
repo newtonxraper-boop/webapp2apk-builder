@@ -7,6 +7,9 @@
   "splash_enabled": {{SPLASH_ENABLED}},
   "crash_report_url": "{{CRASH_REPORT_URL}}",
   "privacy_policy_url": "{{PRIVACY_POLICY_URL}}",
-  "kiosk_enabled": {{KIOSK_ENABLED}}
+  "kiosk_enabled": {{KIOSK_ENABLED}},
+  "update_check_url": "{{UPDATE_CHECK_URL}}",
+  "build_id": "{{REQUEST_ID}}",
+  "background_enabled": {{BACKGROUND_ENABLED}}
 }
 

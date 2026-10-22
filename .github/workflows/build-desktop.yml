@@ -3,6 +3,10 @@ name: Build Desktop App
 on:
   workflow_dispatch:
     inputs:
+      app_version:
+        description: 'Version shown to people, e.g. 1.0.3 (the website raises it with every rebuild of the same app). Blank = keep 1.0.0'
+        required: false
+        default: ''
       platform:
         description: "'windows' or 'macos'"
         required: true
@@ -116,6 +120,7 @@ jobs:
           EXTERNAL_LINKS_IN_APP: ${{ inputs.external_links_in_app }}
           UPDATE_CHECK_URL: ${{ inputs.update_check_url }}
           BUILD_ID: ${{ inputs.request_id }}
+          APP_VERSION: ${{ inputs.app_version }}
           NAV_ITEMS_B64: ${{ inputs.nav_items_b64 }}
           CRASH_REPORT_URL: ${{ inputs.crash_report_url }}
           PRIVACY_POLICY_URL: ${{ inputs.privacy_policy_url }}
