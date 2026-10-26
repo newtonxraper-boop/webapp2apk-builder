@@ -23,7 +23,6 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.util.TypedValue;
 import android.view.Gravity;
-import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
 import android.webkit.URLUtil;
@@ -113,11 +112,8 @@ public class MainActivity extends AppCompatActivity {
     private View tabNotch;
     private TextView offlineBanner;
     private TextView updateBanner;
-    private View shareButton;
-    private View refreshButton;
-    private View settingsButton;
-    private View backNavButton;
-    private View forwardNavButton;
+    private View topAppBar;
+    private android.widget.ImageButton moreButton;
 
     // Offline copy of the CSS/JS/images/fonts the pages load (see AssetCache).
     private AssetCache assetCache;
@@ -205,8 +201,6 @@ public class MainActivity extends AppCompatActivity {
 
     private float cachedDensity = 0f;
     private static final int MAX_CACHE_FILE_COUNT = 500;
-    private long lastDragUpdateTime = 0;
-    private static final long DRAG_UPDATE_THROTTLE_MS = 16;
     private java.util.concurrent.ExecutorService prefetchExecutor;
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -229,11 +223,6 @@ public class MainActivity extends AppCompatActivity {
             attemptRealRefresh();
         });
         updateBanner = findViewById(R.id.updateBanner);
-        shareButton = findViewById(R.id.shareButton);
-        refreshButton = findViewById(R.id.refreshButton);
-        settingsButton = findViewById(R.id.settingsButton);
-        backNavButton = findViewById(R.id.backNavButton);
-        forwardNavButton = findViewById(R.id.forwardNavButton);
         syncPendingBanner = findViewById(R.id.syncPendingBanner);
         syncPendingText = findViewById(R.id.syncPendingText);
         syncPendingSendNowButton = findViewById(R.id.syncPendingSendNowButton);
@@ -276,10 +265,7 @@ public class MainActivity extends AppCompatActivity {
         setupWebView();
         updateSyncBanner(getQueueSize());
         setupDownloadListener();
-        setupShareButton();
-        setupRefreshButton();
-        setupSettingsButton();
-        setupNavButtons();
+        setupTopBar();
         setupConnectivityBanner();
         setupBottomTabs();
         checkForAppUpdate();
@@ -401,14 +387,6 @@ public class MainActivity extends AppCompatActivity {
         if (webView != null) {
             webView.animate().cancel();
         }
-        if (shareButton != null) {
-            shareButton.animate().cancel();
-        }
-        if (refreshButton != null) {
-            refreshButton.animate().cancel();
-        }
-        if (backNavButton != null) backNavButton.animate().cancel();
-        if (forwardNavButton != null) forwardNavButton.animate().cancel();
         if (assetExecutor != null) {
             assetExecutor.shutdownNow();
             assetExecutor = null;
@@ -634,7 +612,6 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
                 super.doUpdateVisitedHistory(view, url, isReload);
-                updateNavButtons();
             }
 
             @Override
@@ -751,7 +728,6 @@ public class MainActivity extends AppCompatActivity {
                     // late-loading files are included too.
                     view.postDelayed(MainActivity.this::flushAssetsInBackground, 2500);
                 }
-                updateNavButtons();
 
                 cacheRetryInProgress = false;
             }
@@ -855,32 +831,54 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ------------------------------------------------------------------
-    // Back / Forward buttons (greyed out when there is nowhere to go)
+    // Top app bar + three-dot menu
     // ------------------------------------------------------------------
+    // The menu is a popup anchored to the dots. Tapping anywhere outside it
+    // dismisses it (and that tap is swallowed, so nothing underneath fires).
+    // "Back" is deliberately not in the menu: the phone's back button/gesture
+    // already walks back through the page history (see setupBackHandling).
 
-    private void setupNavButtons() {
-        if (backNavButton == null || forwardNavButton == null) return;
-        backNavButton.setOnClickListener(v -> {
+    private void setupTopBar() {
+        topAppBar = findViewById(R.id.topAppBar);
+        moreButton = findViewById(R.id.moreButton);
+        TextView title = findViewById(R.id.topBarTitle);
+
+        // Readable title/icon colour on whatever bar colour the app uses.
+        int barColor = ContextCompat.getColor(this, R.color.primary_dark_color);
+        int fg = isColorLight(barColor) ? Color.parseColor("#1B1B1F") : Color.WHITE;
+        title.setTextColor(fg);
+        moreButton.setColorFilter(fg);
+
+        moreButton.setOnClickListener(v -> {
             v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
-            if (webView.canGoBack()) webView.goBack();
+            showOverflowMenu(v);
         });
-        forwardNavButton.setOnClickListener(v -> {
-            v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
-            if (webView.canGoForward()) webView.goForward();
-        });
-        makeDraggable(backNavButton, "back_btn");
-        makeDraggable(forwardNavButton, "forward_btn");
-        updateNavButtons();
     }
 
-    private void updateNavButtons() {
-        if (webView == null || backNavButton == null || forwardNavButton == null) return;
-        boolean canBack = webView.canGoBack();
-        boolean canForward = webView.canGoForward();
-        backNavButton.setEnabled(canBack);
-        backNavButton.setAlpha(canBack ? 1f : 0.35f);
-        forwardNavButton.setEnabled(canForward);
-        forwardNavButton.setAlpha(canForward ? 1f : 0.35f);
+    private void showOverflowMenu(View anchor) {
+        androidx.appcompat.widget.PopupMenu menu =
+                new androidx.appcompat.widget.PopupMenu(this, anchor, Gravity.END);
+        menu.getMenuInflater().inflate(R.menu.main_overflow, menu.getMenu());
+
+        // Forward is only usable when there is a page to go forward to.
+        menu.getMenu().findItem(R.id.action_forward)
+                .setEnabled(webView != null && webView.canGoForward());
+
+        menu.setOnMenuItemClickListener(item -> {
+            int id = item.getItemId();
+            if (id == R.id.action_refresh) {
+                attemptRealRefresh();
+                return true;
+            } else if (id == R.id.action_forward) {
+                if (webView != null && webView.canGoForward()) webView.goForward();
+                return true;
+            } else if (id == R.id.action_settings) {
+                startActivity(new Intent(this, SettingsActivity.class));
+                return true;
+            }
+            return false;
+        });
+        menu.show();
     }
 
     private WebResourceResponse maybeServeFromOfflineCache(WebResourceRequest request) {
@@ -2118,168 +2116,6 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception e) {
             showSnackbar("Could not start download");
         }
-    }
-
-    private void setupShareButton() {
-        shareButton.setOnClickListener(v -> {
-            v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
-            spinIcon(v, 450);
-            String url = webView.getUrl();
-            if (url == null || url.startsWith("file:///android_asset/")) url = homeUrl;
-            String title = webView.getTitle();
-
-            Intent shareIntent = new Intent(Intent.ACTION_SEND);
-            shareIntent.setType("text/plain");
-            if (title != null && !title.isEmpty()) {
-                shareIntent.putExtra(Intent.EXTRA_SUBJECT, title);
-            }
-            shareIntent.putExtra(Intent.EXTRA_TEXT, url);
-            startActivity(Intent.createChooser(shareIntent, "Share via"));
-        });
-
-        makeDraggable(shareButton, "share_btn");
-    }
-
-    private void setupRefreshButton() {
-        refreshButton.setOnClickListener(v -> {
-            v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
-            spinIcon(v, 600);
-            attemptRealRefresh();
-        });
-
-        makeDraggable(refreshButton, "refresh_btn");
-    }
-
-    private void setupSettingsButton() {
-        settingsButton.setOnClickListener(v -> {
-            v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
-            spinIcon(v, 700);
-            startActivity(new Intent(this, SettingsActivity.class));
-        });
-
-        makeDraggable(settingsButton, "settings_btn");
-    }
-
-    private void makeDraggable(View view, String prefsKeyPrefix) {
-        applyFloatingStyle(view);
-        if (prefs.contains(prefsKeyPrefix + "_x")) {
-            view.post(() -> {
-                float x = prefs.getFloat(prefsKeyPrefix + "_x", view.getX());
-                float y = prefs.getFloat(prefsKeyPrefix + "_y", view.getY());
-                view.setX(x);
-                view.setY(y);
-            });
-        }
-
-        final float[] touchOffsetX = new float[1];
-        final float[] touchOffsetY = new float[1];
-        final float[] downRawX = new float[1];
-        final float[] downRawY = new float[1];
-        final boolean[] isDragging = {false};
-
-        view.setOnTouchListener((v, event) -> {
-            switch (event.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
-                    touchOffsetX[0] = v.getX() - event.getRawX();
-                    touchOffsetY[0] = v.getY() - event.getRawY();
-                    downRawX[0] = event.getRawX();
-                    downRawY[0] = event.getRawY();
-                    isDragging[0] = false;
-                    v.animate().scaleX(0.88f).scaleY(0.88f).setDuration(100).start();
-                    return true;
-
-                case MotionEvent.ACTION_MOVE: {
-                    float moved = Math.abs(event.getRawX() - downRawX[0]) + Math.abs(event.getRawY() - downRawY[0]);
-                    if (moved > dpToPx(8)) isDragging[0] = true;
-
-                    long now = System.currentTimeMillis();
-                    if (now - lastDragUpdateTime < DRAG_UPDATE_THROTTLE_MS) return true;
-                    lastDragUpdateTime = now;
-
-                    View parent = (View) v.getParent();
-                    float newX = event.getRawX() + touchOffsetX[0];
-                    float newY = event.getRawY() + touchOffsetY[0];
-                    newX = Math.max(0, Math.min(newX, parent.getWidth() - v.getWidth()));
-                    newY = Math.max(0, Math.min(newY, parent.getHeight() - v.getHeight()));
-                    v.setX(newX);
-                    v.setY(newY);
-                    return true;
-                }
-
-                case MotionEvent.ACTION_UP:
-                    if (isDragging[0]) {
-                        v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
-                        prefs.edit()
-                                .putFloat(prefsKeyPrefix + "_x", v.getX())
-                                .putFloat(prefsKeyPrefix + "_y", v.getY())
-                                .apply();
-                    } else {
-                        playClickEffect(v);
-                        v.performClick();
-                    }
-                    return true;
-
-                case MotionEvent.ACTION_CANCEL:
-                    v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
-                    return true;
-
-                default:
-                    return false;
-            }
-        });
-    }
-
-    /** Coloured glow + readable icon colour for the floating buttons (colours come from build.php). */
-    private void applyFloatingStyle(View v) {
-        v.setElevation(dpToPx(10));
-        if (Build.VERSION.SDK_INT >= 28) {
-            int accent = ContextCompat.getColor(this, R.color.accent_color);
-            v.setOutlineSpotShadowColor(accent);
-            v.setOutlineAmbientShadowColor(accent);
-        }
-        if (v instanceof android.widget.TextView) {
-            double lum = (androidx.core.graphics.ColorUtils.calculateLuminance(ContextCompat.getColor(this, R.color.primary_color))
-                    + androidx.core.graphics.ColorUtils.calculateLuminance(ContextCompat.getColor(this, R.color.accent_color))) / 2.0;
-            ((android.widget.TextView) v).setTextColor(lum > 0.5 ? Color.parseColor("#04150A") : Color.WHITE);
-        }
-    }
-
-    /** Springy "pop" plus an expanding ring in the accent colour when a floating button is tapped. */
-    private void playClickEffect(final View v) {
-        v.animate().cancel();
-        v.animate().scaleX(1f).scaleY(1f).setDuration(340)
-                .setInterpolator(new android.view.animation.OvershootInterpolator(4f)).start();
-
-        if (!v.isEnabled() || !(v.getParent() instanceof android.view.ViewGroup)) return;
-        final android.view.ViewGroup parent = (android.view.ViewGroup) v.getParent();
-        final GradientDrawable ring = new GradientDrawable();
-        ring.setShape(GradientDrawable.OVAL);
-        ring.setColor(Color.TRANSPARENT);
-        ring.setStroke(dpToPx(3), ContextCompat.getColor(this, R.color.accent_color));
-        final int cx = (int) (v.getX() + v.getWidth() / 2f);
-        final int cy = (int) (v.getY() + v.getHeight() / 2f);
-        final int base = v.getWidth() / 2;
-        parent.getOverlay().add(ring);
-
-        android.animation.ValueAnimator ringAnim = android.animation.ValueAnimator.ofFloat(0f, 1f);
-        ringAnim.setDuration(460);
-        ringAnim.addUpdateListener(a -> {
-            float f = (float) a.getAnimatedValue();
-            int r = (int) (base * (1f + 0.9f * f));
-            ring.setBounds(cx - r, cy - r, cx + r, cy + r);
-            ring.setAlpha((int) (200 * (1f - f)));
-        });
-        ringAnim.addListener(new android.animation.AnimatorListenerAdapter() {
-            @Override public void onAnimationEnd(android.animation.Animator animation) {
-                parent.getOverlay().remove(ring);
-            }
-        });
-        ringAnim.start();
-    }
-
-    /** Little icon flourish (a full spin) used by the share / reload / settings buttons. */
-    private void spinIcon(View v, long ms) {
-        android.animation.ObjectAnimator.ofFloat(v, View.ROTATION, 0f, 360f).setDuration(ms).start();
     }
 
     private boolean openExternally(Uri uri) {
