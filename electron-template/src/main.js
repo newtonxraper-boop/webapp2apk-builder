@@ -1597,28 +1597,55 @@ function setupSession() {
     if (ses.preconnect && isHttpUrl(config.app_url)) ses.preconnect({ url: config.app_url, numSockets: 4 });
   } catch (e) { /* purely an optimisation */ }
 
-  const allowed = (permission) => {
-    if (permission === 'media') return !!config.filecamera_enabled;
+  // Microphone is always allowed (voice notes, calls); the camera follows the "file & camera" option.
+  const mediaAllowed = (types) => {
+    const list = (types && types.length) ? types : ['audio', 'video'];
+    return list.every((t) => t === 'audio' || (t === 'video' && !!config.filecamera_enabled));
+  };
+  const allowed = (permission, mediaTypes) => {
+    if (permission === 'media') return mediaAllowed(mediaTypes);
     if (permission === 'notifications') return !!config.push_enabled && notificationsAllowed();
     return permission === 'geolocation' || permission === 'fullscreen'
       || permission === 'clipboard-read' || permission === 'clipboard-sanitized-write';
   };
 
+  // The operating system can still block the microphone (macOS / Windows privacy settings): say so and open that page.
+  const openMicSettings = () => {
+    try {
+      if (process.platform === 'darwin') shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone');
+      else if (process.platform === 'win32') shell.openExternal('ms-settings:privacy-microphone');
+    } catch (e) { /* best effort */ }
+  };
+
   ses.setPermissionRequestHandler(async (wc, permission, callback, details) => {
-    let ok = allowed(permission);
+    const types = (details && details.mediaTypes) || undefined;
+    let ok = allowed(permission, types);
     if (ok && permission === 'media' && process.platform === 'darwin') {
       // macOS asks the person once, at the OS level, per device type.
       try {
-        const types = (details && details.mediaTypes) || ['video'];
-        for (const t of types) {
+        for (const t of (types || ['audio'])) {
           if (t === 'video') ok = ok && await systemPreferences.askForMediaAccess('camera');
           if (t === 'audio') ok = ok && await systemPreferences.askForMediaAccess('microphone');
         }
       } catch (e) { ok = false; }
     }
+    if (ok && permission === 'media' && process.platform === 'win32') {
+      try {
+        if ((types || ['audio']).includes('audio') && systemPreferences.getMediaAccessStatus('microphone') === 'denied') {
+          ok = false;
+        }
+      } catch (e) { /* status not available: let Chromium decide */ }
+    }
+    if (!ok && permission === 'media' && (!types || types.includes('audio')) && mediaAllowed(['audio'])) {
+      try { toast('Microphone is blocked in your system settings. Opening them...'); } catch (e) {}
+      openMicSettings();
+    }
     callback(ok);
   });
-  ses.setPermissionCheckHandler((wc, permission) => allowed(permission));
+  ses.setPermissionCheckHandler((wc, permission, origin, details) => {
+    const mt = details && details.mediaType;
+    return allowed(permission, mt && mt !== 'unknown' ? [mt] : undefined);
+  });
 
   // The shell (local UI) needs the camera only for the QR scanner overlay.
   session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => {

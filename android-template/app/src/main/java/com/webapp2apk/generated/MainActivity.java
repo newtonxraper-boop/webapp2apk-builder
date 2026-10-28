@@ -50,6 +50,7 @@ import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 import com.google.android.gms.location.CurrentLocationRequest;
@@ -434,15 +435,29 @@ public class MainActivity extends AppCompatActivity {
         cameraMicPermissionLauncher = registerForActivityResult(
                 new ActivityResultContracts.RequestMultiplePermissions(),
                 grants -> {
-                    if (pendingWebPermissionRequest == null) return;
-                    boolean allGranted = true;
-                    for (Boolean g : grants.values()) allGranted = allGranted && Boolean.TRUE.equals(g);
-                    if (allGranted) {
-                        pendingWebPermissionRequest.grant(pendingWebPermissionRequest.getResources());
-                    } else {
-                        pendingWebPermissionRequest.deny();
-                    }
+                    PermissionRequest req = pendingWebPermissionRequest;
                     pendingWebPermissionRequest = null;
+                    if (req == null) return;
+                    // Grant exactly the things the page asked for AND the person allowed.
+                    // (Before, one "no" - for example to the camera - also refused the microphone.)
+                    List<String> granted = new ArrayList<>();
+                    for (String res : req.getResources()) {
+                        String perm = androidPermissionFor(res);
+                        if (perm == null) continue;
+                        if (res.equals(PermissionRequest.RESOURCE_VIDEO_CAPTURE) && !filecameraEnabled) continue;
+                        if (ContextCompat.checkSelfPermission(MainActivity.this, perm) == PackageManager.PERMISSION_GRANTED) granted.add(res);
+                    }
+                    if (granted.isEmpty()) {
+                        req.deny();
+                        // "Don't ask again" was chosen: Android will not show the prompt any more, so send the person to Settings.
+                        if (grants.containsKey(Manifest.permission.RECORD_AUDIO)
+                                && !Boolean.TRUE.equals(grants.get(Manifest.permission.RECORD_AUDIO))
+                                && !ActivityCompat.shouldShowRequestPermissionRationale(MainActivity.this, Manifest.permission.RECORD_AUDIO)) {
+                            showMicBlockedSnackbar();
+                        }
+                    } else {
+                        req.grant(granted.toArray(new String[0]));
+                    }
                 });
 
         storagePermissionLauncher = registerForActivityResult(
@@ -752,27 +767,70 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onPermissionRequest(PermissionRequest request) {
-                if (!filecameraEnabled) {
-                    request.deny();
-                    return;
-                }
-                List<String> needed = new ArrayList<>();
-                needed.add(Manifest.permission.CAMERA);
-                needed.add(Manifest.permission.RECORD_AUDIO);
-                List<String> toRequest = new ArrayList<>();
-                for (String perm : needed) {
-                    if (ContextCompat.checkSelfPermission(MainActivity.this, perm) != PackageManager.PERMISSION_GRANTED) {
-                        toRequest.add(perm);
+                // The page (getUserMedia) asks for the microphone and/or the camera.
+                // Microphone: always allowed (voice notes, calls). Camera: only when the app has file/camera access on.
+                runOnUiThread(() -> {
+                    List<String> toRequest = new ArrayList<>();
+                    boolean anyKnown = false;
+                    for (String res : request.getResources()) {
+                        String perm = androidPermissionFor(res);
+                        if (perm == null) continue;                                   // unknown kind: never granted
+                        if (res.equals(PermissionRequest.RESOURCE_VIDEO_CAPTURE) && !filecameraEnabled) continue;
+                        anyKnown = true;
+                        if (ContextCompat.checkSelfPermission(MainActivity.this, perm) != PackageManager.PERMISSION_GRANTED && !toRequest.contains(perm)) toRequest.add(perm);
                     }
-                }
-                if (toRequest.isEmpty()) {
-                    request.grant(request.getResources());
-                } else {
+                    if (!anyKnown) { request.deny(); return; }
+                    if (toRequest.isEmpty()) {
+                        grantAllowedResources(request);
+                        return;
+                    }
+                    // a newer request replaces an unanswered older one
+                    if (pendingWebPermissionRequest != null) { try { pendingWebPermissionRequest.deny(); } catch (Exception ignored) {} }
                     pendingWebPermissionRequest = request;
                     cameraMicPermissionLauncher.launch(toRequest.toArray(new String[0]));
-                }
+                });
+            }
+
+            @Override
+            public void onPermissionRequestCanceled(PermissionRequest request) {
+                if (pendingWebPermissionRequest == request) pendingWebPermissionRequest = null;
             }
         });
+    }
+
+    /** Which Android permission a WebView resource needs (null = something we never grant). */
+    private String androidPermissionFor(String webResource) {
+        if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(webResource)) return Manifest.permission.RECORD_AUDIO;
+        if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(webResource)) return Manifest.permission.CAMERA;
+        return null;
+    }
+
+    private void grantAllowedResources(PermissionRequest request) {
+        List<String> ok = new ArrayList<>();
+        for (String res : request.getResources()) {
+            String perm = androidPermissionFor(res);
+            if (perm == null) continue;
+            if (res.equals(PermissionRequest.RESOURCE_VIDEO_CAPTURE) && !filecameraEnabled) continue;
+            if (ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED) ok.add(res);
+        }
+        if (ok.isEmpty()) request.deny(); else request.grant(ok.toArray(new String[0]));
+    }
+
+    /** Microphone was refused with "don't ask again": offer a one-tap way to the app's Settings page. */
+    private void showMicBlockedSnackbar() {
+        View root = findViewById(android.R.id.content);
+        Snackbar snackbar = Snackbar.make(root, "Microphone is blocked for this app.", Snackbar.LENGTH_LONG);
+        snackbar.setBackgroundTint(ContextCompat.getColor(this, R.color.primary_dark_color));
+        snackbar.setTextColor(ContextCompat.getColor(this, android.R.color.white));
+        snackbar.setActionTextColor(ContextCompat.getColor(this, android.R.color.white));
+        snackbar.setAction("Open settings", v -> {
+            try {
+                Intent i = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()));
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(i);
+            } catch (Exception ignored) {}
+        });
+        snackbar.show();
     }
 
     /**
