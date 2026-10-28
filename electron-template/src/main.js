@@ -44,9 +44,13 @@ const { Notifier } = require('./lib/notifier');
 const { buildInjection } = require('./lib/page-script');
 const netutil = require('./lib/net');
 const { Updater } = require('./lib/updater');
+const { protocolScheme, parseAuthLink, authLinkFromArgv, isGoogleHandoffUrl } = require('./lib/protocol');
 
 const config = loadConfig();
 const PARTITION = 'persist:webapp';
+// "Continue with Google": Google sign-in opens in the person's real browser and the site
+// hands the finished login back through this app's own link scheme (see lib/protocol.js).
+const PROTOCOL = protocolScheme(config.package_name);
 const GUEST_PRELOAD = path.join(__dirname, 'guest-preload.js');
 const SHELL_PRELOAD = path.join(__dirname, 'shell-preload.js');
 const OFFLINE_PAGE = path.join(__dirname, 'offline.html');
@@ -288,6 +292,40 @@ function openUrlArg(argv) {
   if (!a) return null;
   const url = a.slice('--open-url='.length);
   return isAllowedTarget(url) ? url : null;
+}
+
+// ---- Google sign-in hand-back -------------------------------------------------
+// Google refuses to sign anyone in inside an embedded browser. When the site sends the
+// guest to Google's sign-in page (for a login the site finishes itself), open that page in
+// the default browser instead. The site then opens  <scheme>://auth?url=<its login page
+// with a one-time token>  which lands here (handleAuthLink) and finishes the login inside
+// the app's own window / session.
+function handOffGoogleSignIn(e, url) {
+  if (!isGoogleHandoffUrl(url, config.app_url)) return false;
+  if (e && typeof e.preventDefault === 'function') e.preventDefault();
+  const now = Date.now();
+  // a redirect chain can report the same URL twice - open the browser once
+  if (state.lastHandoffUrl === url && now - (state.lastHandoffAt || 0) < 3000) return true;
+  state.lastHandoffUrl = url;
+  state.lastHandoffAt = now;
+  openExternalSafe(url);
+  toast('Finish signing in with Google in your browser - you will come straight back here.');
+  return true;
+}
+
+// Open a hand-back address (already checked to be on the app's own site) in the app.
+function openAuthTarget(target) {
+  if (!target) return;
+  if (isLive(guest)) {
+    guest.loadURL(target).catch(() => {});
+  } else {
+    state.pendingAuthUrl = target; // app is still starting - createWindow() picks it up
+  }
+  showMainWindow();
+}
+
+function handleAuthLink(link) {
+  openAuthTarget(parseAuthLink(link, PROTOCOL, config.app_url));
 }
 
 // Menu items / nav buttons: the app's own site always loads in the app; any
@@ -929,6 +967,7 @@ function attachGuestHandlers(contents) {
 
   contents.setWindowOpenHandler(({ url, disposition }) => {
     if (!isHttpUrl(url)) { openExternalSafe(url); return { action: 'deny' }; }
+    if (handOffGoogleSignIn(null, url)) return { action: 'deny' };
     // Real popup windows (window.open with features) - e.g. "Sign in with Google" -
     // need to stay a child window so the site can read the result back. They
     // share the app's session, so the login lands in the app.
@@ -944,6 +983,7 @@ function attachGuestHandlers(contents) {
   });
 
   contents.on('will-navigate', (e, url) => {
+    if (handOffGoogleSignIn(e, url)) return;
     trackNavigationTarget(url);
     if (!isHttpUrl(url)) {
       // file: (our own offline page) and data: (cached pages) are internal;
@@ -956,7 +996,11 @@ function attachGuestHandlers(contents) {
       openExternalSafe(url);
     }
   });
-  contents.on('will-redirect', (e, url) => trackNavigationTarget(url));
+  contents.on('will-redirect', (e, url) => {
+    // the site's "Continue with Google" link answers with a redirect to Google
+    if (handOffGoogleSignIn(e, url)) return;
+    trackNavigationTarget(url);
+  });
 
   contents.on('did-start-navigation', (e, url, isInPlace, isMainFrame) => {
     // Electron passes these positionally (and also on `details`); accept both.
@@ -1585,8 +1629,15 @@ function setupSession() {
         cb(dataSaverActive() && shouldBlockByHeaders(details) ? { cancel: true } : {});
       });
       ses.webRequest.onBeforeSendHeaders((details, cb) => {
-        if (!dataSaverActive()) return cb({});
-        cb({ requestHeaders: Object.assign({}, details.requestHeaders, { 'Save-Data': 'on' }) });
+        const headers = Object.assign({}, details.requestHeaders);
+        // Tell the site this is the desktop app (the Android app does the same with its package
+        // name) so "Continue with Google" can use the browser hand-back. Page navigations only,
+        // so ordinary requests / CORS are untouched.
+        if (details.resourceType === 'mainFrame' && isSameSiteHost(appHost, hostOf(details.url))) {
+          headers['X-Requested-With'] = PROTOCOL;
+        }
+        if (dataSaverActive()) headers['Save-Data'] = 'on';
+        cb({ requestHeaders: headers });
       });
     }
   } catch (e) { /* never block startup over this */ }
@@ -1675,10 +1726,23 @@ function setupSession() {
 function start() {
   if (process.platform === 'win32') app.setAppUserModelId(config.package_name);
 
+  // Own link scheme: the browser hands a finished Google sign-in back through it.
+  try {
+    if (typeof app.setAsDefaultProtocolClient === 'function') app.setAsDefaultProtocolClient(PROTOCOL);
+  } catch (e) { /* the installer also registers it; not fatal */ }
+
   app.on('second-instance', (event, argv) => {
     showMainWindow(); // also brings the app back from the tray
+    const auth = authLinkFromArgv(argv, PROTOCOL, config.app_url);
+    if (auth) { openAuthTarget(auth); return; }
     const url = openUrlArg(argv);
     if (url) navigateGuest(url);
+  });
+
+  // macOS delivers custom links here (also before the app is ready).
+  app.on('open-url', (event, link) => {
+    event.preventDefault();
+    handleAuthLink(link);
   });
 
   app.on('web-contents-created', (event, contents) => {
@@ -1785,7 +1849,9 @@ function start() {
     notifier.restore();
 
     createTray();
-    createWindow(openUrlArg(process.argv) || config.app_url);
+    const firstAuth = state.pendingAuthUrl || authLinkFromArgv(process.argv, PROTOCOL, config.app_url);
+    state.pendingAuthUrl = null;
+    createWindow(firstAuth || openUrlArg(process.argv) || config.app_url);
 
     powerMonitor.on('lock-screen', lockNow);
     // Wake from sleep: the network often needs a moment - re-check reachability.

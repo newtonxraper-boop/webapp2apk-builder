@@ -30,6 +30,9 @@
       "node_modules/jsqr/dist/jsQR.js"
     ],
     "icon": "build/icon.png",
+    "protocols": [
+      { "name": "{{APP_NAME}} sign-in", "schemes": ["{{PROTOCOL_SCHEME}}"] }
+    ],
     "win": {
       "target": [
         { "target": "nsis", "arch": ["x64"] }

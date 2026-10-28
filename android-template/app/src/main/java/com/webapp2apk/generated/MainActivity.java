@@ -305,6 +305,18 @@ public class MainActivity extends AppCompatActivity {
         Uri data = intent.getData();
         try {
             Uri homeUri = Uri.parse(homeUrl);
+            // "Sign in with Google" hand-back: <package-name>://auth?url=https://<our site>/...
+            // Only an address on this app's own site is ever opened (never an address from another site).
+            if (getPackageName().equalsIgnoreCase(data.getScheme()) && "auth".equalsIgnoreCase(data.getHost())) {
+                String target = data.getQueryParameter("url");
+                if (target == null) return null;
+                Uri t = Uri.parse(target);
+                if ("https".equalsIgnoreCase(t.getScheme()) && homeUri.getHost() != null
+                        && homeUri.getHost().equalsIgnoreCase(t.getHost())) {
+                    return t.toString();
+                }
+                return null;
+            }
             if (homeUri.getHost() != null && homeUri.getHost().equalsIgnoreCase(data.getHost())) {
                 return data.toString();
             }

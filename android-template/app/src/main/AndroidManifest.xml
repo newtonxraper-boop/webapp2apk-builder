@@ -111,6 +111,19 @@
                     android:scheme="https"
                     android:host="{{APP_HOST}}" />
             </intent-filter>
+
+            <!-- "Sign in with Google" hand-back. Google will not sign anyone in inside an app's own
+                 browser (WebView), so the sign-in runs in Chrome. When it is done the site sends the person
+                 to <package-name>://auth?url=<one-time login address on the site>, which lands here, and the
+                 app then opens that address in its own browser (see resolveDeepLinkUrl in MainActivity). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="${applicationId}"
+                    android:host="auth" />
+            </intent-filter>
         </activity>
 
         <activity

@@ -52,6 +52,14 @@ function validatePackageName(pkg) {
   return segments.join('.');
 }
 
+// Link scheme the browser uses to hand a finished "Continue with Google" back to the app.
+// Keep identical to protocolScheme() in electron-template/src/lib/protocol.js.
+function protocolScheme(packageName) {
+  let s = String(packageName || '').toLowerCase().replace(/_/g, '-').replace(/[^a-z0-9+.\-]/g, '');
+  if (!/^[a-z]/.test(s)) s = 'app' + s;
+  return s.slice(0, 100) || 'webapp';
+}
+
 function derivePackageName(appName) {
   return `com.webapp2apk.${sanitizeSegment(appName)}`;
 }
@@ -187,7 +195,8 @@ async function main() {
   pkg = pkg
     .split('{{APP_NAME}}').join(esc(appName))
     .split('{{PACKAGE_NAME}}').join(esc(packageName))
-    .split('{{PACKAGE_SLUG}}').join(esc(packageSlug));
+    .split('{{PACKAGE_SLUG}}').join(esc(packageSlug))
+    .split('{{PROTOCOL_SCHEME}}').join(esc(protocolScheme(packageName)));
   const parsedPkg = JSON.parse(pkg); // fail the build here, loudly, rather than deep inside electron-builder
   // Version people see (installer, Add/Remove Programs, About): the website raises it
   // with every rebuild of the same app, so it continues from the app made before.

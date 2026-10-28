@@ -59,6 +59,11 @@ const fakeSession = () => Object.assign(new EventEmitter(), {
   setUserAgent(ua) { this.ua = ua; },
   setPermissionRequestHandler(fn) { this.reqHandler = fn; },
   setPermissionCheckHandler(fn) { this.checkHandler = fn; },
+  webRequest: {
+    onBeforeRequest(fn) { this.beforeRequest = fn; },
+    onHeadersReceived(fn) { this.headersReceived = fn; },
+    onBeforeSendHeaders(fn) { this.beforeSendHeaders = fn; },
+  },
 });
 const sessions = {};
 const appEvents = new EventEmitter();
@@ -435,6 +440,82 @@ test('external_links_in_app: other websites open in the browser by default, or s
   } finally {
     fs.writeFileSync(cfgPath, original);
     electronMock.shell.openExternal = originalOpen;
+  }
+});
+
+test('Continue with Google: the sign-in page opens in the browser, the app link finishes the login inside the app', async () => {
+  const cfgPath = path.join(__dirname, '..', 'src', 'app_config.json');
+  const original = fs.readFileSync(cfgPath, 'utf8');
+  const userData = tmpDir('w2a-main-google-');
+  const opened = [];
+  const originalOpen = electronMock.shell.openExternal;
+  electronMock.shell.openExternal = async (u) => { opened.push(u); };
+  const GOOGLE = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1&state=abc&redirect_uri=' + encodeURIComponent(HOME + 'login.php');
+  const GOOGLE_OTHER_SITE = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1&redirect_uri=' + encodeURIComponent('https://elsewhere.test/cb');
+
+  try {
+    fs.writeFileSync(cfgPath, JSON.stringify({ app_name: 'Shop', app_url: HOME, package_name: 'com.acme.shop' }));
+    electronMock.app.getPath = () => userData;
+    electronMock.app.removeAllListeners('web-contents-created');
+    electronMock.app.removeAllListeners('second-instance');
+    electronMock.app.removeAllListeners('open-url');
+    let registered = null;
+    electronMock.app.setAsDefaultProtocolClient = (p) => { registered = p; };
+    delete require.cache[require.resolve('../src/main.js')];
+    require('../src/main.js');
+    await wait(50);
+    assert.strictEqual(registered, 'com.acme.shop', 'the app registers its own link scheme');
+
+    // the page's requests carry the app marker so the site knows to use the hand-back
+    const ses = sessions['persist:webapp'];
+    const sendHeaders = (details) => new Promise((resolve) => ses.webRequest.beforeSendHeaders(Object.assign({ requestHeaders: { Accept: '*/*' } }, details), (r) => resolve(r.requestHeaders)));
+    assert.strictEqual((await sendHeaders({ resourceType: 'mainFrame', url: HOME + 'login.php?google=1' }))['X-Requested-With'], 'com.acme.shop');
+    assert.strictEqual((await sendHeaders({ resourceType: 'mainFrame', url: 'https://www.shop.example.com/login.php' }))['X-Requested-With'], 'com.acme.shop');
+    assert.strictEqual((await sendHeaders({ resourceType: 'xhr', url: HOME + 'api' }))['X-Requested-With'], undefined, 'no extra header on ordinary requests');
+    assert.strictEqual((await sendHeaders({ resourceType: 'mainFrame', url: 'https://other.test/' }))['X-Requested-With'], undefined, 'never sent to other sites');
+
+    const guest = new WC('webview');
+    electronMock.app.emit('web-contents-created', {}, guest);
+
+    // 1. the site redirects to Google -> cancelled in the app, opened in the real browser (once)
+    let ev = { prevented: false, preventDefault() { this.prevented = true; } };
+    guest.emit('will-redirect', ev, GOOGLE);
+    assert.strictEqual(ev.prevented, true);
+    assert.deepStrictEqual(opened, [GOOGLE]);
+    guest.emit('will-redirect', { preventDefault() {} }, GOOGLE);
+    assert.strictEqual(opened.length, 1, 'same redirect reported twice -> one browser window');
+
+    // a Google popup the site finishes itself (no hand-back) keeps working in the app as before
+    assert.strictEqual(guest.openHandler({ url: GOOGLE_OTHER_SITE, disposition: 'new-window' }).action, 'allow');
+    ev = { prevented: false, preventDefault() { this.prevented = true; } };
+    guest.emit('will-navigate', ev, GOOGLE_OTHER_SITE);
+    assert.strictEqual(ev.prevented, false);
+
+    // 2. the browser hands the login back: Windows/Linux (second launch with the link)...
+    const back = HOME + 'login.php?app_token=' + 'a'.repeat(48);
+    appEvents.emit('second-instance', {}, ['app.exe', 'com.acme.shop://auth?url=' + encodeURIComponent(back)]);
+    await wait(10);
+    assert.ok(guest.loaded.some((l) => l.url === back), 'token address opens inside the app');
+
+    // ...and macOS (open-url)
+    guest.loaded.length = 0;
+    const evMac = { prevented: false, preventDefault() { this.prevented = true; } };
+    appEvents.emit('open-url', evMac, 'com.acme.shop://auth?url=' + encodeURIComponent(back));
+    await wait(10);
+    assert.strictEqual(evMac.prevented, true);
+    assert.ok(guest.loaded.some((l) => l.url === back));
+
+    // 3. anything that is not our own site is ignored
+    guest.loaded.length = 0;
+    appEvents.emit('open-url', { preventDefault() {} }, 'com.acme.shop://auth?url=' + encodeURIComponent('https://evil.test/login.php?app_token=x'));
+    appEvents.emit('open-url', { preventDefault() {} }, 'other.app://auth?url=' + encodeURIComponent(back));
+    appEvents.emit('open-url', { preventDefault() {} }, 'com.acme.shop://auth?url=' + encodeURIComponent('javascript:alert(1)'));
+    await wait(10);
+    assert.strictEqual(guest.loaded.length, 0);
+  } finally {
+    fs.writeFileSync(cfgPath, original);
+    electronMock.shell.openExternal = originalOpen;
+    delete electronMock.app.setAsDefaultProtocolClient;
   }
 });
 
