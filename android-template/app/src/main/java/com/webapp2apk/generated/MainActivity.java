@@ -13,6 +13,7 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.widget.ImageView;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -269,6 +270,8 @@ public class MainActivity extends AppCompatActivity {
         setupTopBar();
         setupConnectivityBanner();
         setupBottomTabs();
+        int savedBg = getSharedPreferences("chrome", MODE_PRIVATE).getInt("bg", 0);
+        if (savedBg != 0) applyChromeColor(savedBg);
         checkForAppUpdate();
         maybeShowLockScreen();
         PeriodicRefreshWorker.scheduleIfNeeded(getApplicationContext());
@@ -414,13 +417,85 @@ public class MainActivity extends AppCompatActivity {
         int chromeColor = ContextCompat.getColor(this, R.color.primary_dark_color);
         Window window = getWindow();
         window.setStatusBarColor(chromeColor);
-        window.setNavigationBarColor(chromeColor);
+        // Blend the system nav strip into the bottom tab bar so they read as one slim bar.
+        int navColor = ContextCompat.getColor(this, R.color.primary_color);
+        window.setNavigationBarColor(navColor);
 
         boolean lightBackground = isColorLight(chromeColor);
         WindowInsetsControllerCompat controller =
                 WindowCompat.getInsetsController(window, window.getDecorView());
         controller.setAppearanceLightStatusBars(lightBackground);
-        controller.setAppearanceLightNavigationBars(lightBackground);
+        controller.setAppearanceLightNavigationBars(isColorLight(navColor));
+    }
+
+
+    // Pick a vector icon from the tab label / emoji so icons look identical on every phone.
+    private int tabIconFor(String label, String icon) {
+        String t = (label + " " + icon).toLowerCase();
+        if (t.contains("home") || t.contains("\uD83C\uDFE0")) return R.drawable.ic_tab_home;
+        if (t.contains("chat") || t.contains("message") || t.contains("\uD83D\uDCAC")) return R.drawable.ic_tab_chat;
+        if (t.contains("group") || t.contains("room") || t.contains("team")) return R.drawable.ic_tab_groups;
+        if (t.contains("call") || t.contains("phone")) return R.drawable.ic_tab_call;
+        if (t.contains("inbox") || t.contains("mail") || t.contains("\u23F3")) return R.drawable.ic_tab_inbox;
+        if (t.contains("setting") || t.contains("\u2699")) return R.drawable.ic_tab_settings;
+        if (t.contains("profile") || t.contains("user") || t.contains("account") || t.startsWith("me ") || t.contains("\uD83E\uDDD1")) return R.drawable.ic_tab_person;
+        if (t.contains("school") || t.contains("class") || t.contains("learn")) return R.drawable.ic_tab_school;
+        if (t.contains("notif") || t.contains("alert") || t.contains("bell")) return R.drawable.ic_tab_bell;
+        if (t.contains("vote") || t.contains("poll") || t.contains("result")) return R.drawable.ic_tab_vote;
+        if (t.contains("search") || t.contains("find")) return R.drawable.ic_tab_search;
+        if (t.contains("star") || t.contains("fav")) return R.drawable.ic_tab_star;
+        return R.drawable.ic_tab_apps;
+    }
+
+    // Colour status bar, top bar, tab bar and nav strip from the page's own background.
+    private void applyChromeColor(int bg) {
+        Window window = getWindow();
+        window.setStatusBarColor(bg);
+        window.setNavigationBarColor(bg);
+        boolean light = isColorLight(bg);
+        WindowInsetsControllerCompat c = WindowCompat.getInsetsController(window, window.getDecorView());
+        c.setAppearanceLightStatusBars(light);
+        c.setAppearanceLightNavigationBars(light);
+
+        if (topAppBar != null) topAppBar.setBackgroundColor(bg);
+        int fg = light ? Color.parseColor("#1B1B1F") : Color.WHITE;
+        TextView title = findViewById(R.id.topBarTitle);
+        if (title != null) title.setTextColor(fg);
+
+        if (bottomTabBarContainer != null) {
+            GradientDrawable g = new GradientDrawable();
+            g.setColor(bg);
+            g.setCornerRadii(new float[]{dpToPx(12), dpToPx(12), dpToPx(12), dpToPx(12), 0, 0, 0, 0});
+            bottomTabBarContainer.setBackground(g);
+            bottomTabBarContainer.setAlpha(1f);
+        }
+    }
+
+    private void readPageColor(WebView view) {
+        final String js = "(function(){var m=document.querySelector('meta[name=theme-color]');"
+                + "if(m&&m.content)return m.content;"
+                + "var c=getComputedStyle(document.body).backgroundColor;"
+                + "if(!c||c==='rgba(0, 0, 0, 0)'||c==='transparent')c=getComputedStyle(document.documentElement).backgroundColor;"
+                + "return c;})()";
+        view.evaluateJavascript(js, value -> {
+            try {
+                if (value == null || value.equals("null")) return;
+                String v = value.replace("\"", "").trim();
+                int color;
+                if (v.startsWith("#")) {
+                    color = Color.parseColor(v);
+                } else {
+                    java.util.regex.Matcher m = java.util.regex.Pattern
+                            .compile("rgba?\\(\\s*(\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)(?:[,\\s/]+([\\d.]+))?").matcher(v);
+                    if (!m.find()) return;
+                    if (m.group(4) != null && Float.parseFloat(m.group(4)) < 0.5f) return;
+                    color = Color.rgb(Integer.parseInt(m.group(1)),
+                            Integer.parseInt(m.group(2)), Integer.parseInt(m.group(3)));
+                }
+                applyChromeColor(color);
+                getSharedPreferences("chrome", MODE_PRIVATE).edit().putInt("bg", color).apply();
+            } catch (Exception ignored) { }
+        });
     }
 
     private static boolean isColorLight(int color) {
@@ -722,6 +797,7 @@ public class MainActivity extends AppCompatActivity {
                     maybeFlushCookies();
                 }
                 lastPageUrl = url;
+                readPageColor(view);
 
                 injectOfflineQueueScript(view, url);
                 injectPrintOverrideScript(view);
@@ -917,11 +993,49 @@ public class MainActivity extends AppCompatActivity {
         int barColor = ContextCompat.getColor(this, R.color.primary_dark_color);
         int fg = isColorLight(barColor) ? Color.parseColor("#1B1B1F") : Color.WHITE;
         title.setTextColor(fg);
-        moreButton.setColorFilter(fg);
 
         moreButton.setOnClickListener(v -> {
             v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
             showOverflowMenu(v);
+        });
+
+        // Tiny floating menu button: drag it anywhere, it snaps to the nearest side.
+        final float[] down = new float[4];
+        final boolean[] moved = {false};
+        moreButton.setOnTouchListener((v, e) -> {
+            View parent = (View) v.getParent();
+            switch (e.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    down[0] = e.getRawX(); down[1] = e.getRawY();
+                    down[2] = v.getTranslationX(); down[3] = v.getTranslationY();
+                    moved[0] = false;
+                    v.setAlpha(0.95f);
+                    return true;
+                case android.view.MotionEvent.ACTION_MOVE: {
+                    float dx = e.getRawX() - down[0], dy = e.getRawY() - down[1];
+                    if (Math.abs(dx) > dpToPx(6) || Math.abs(dy) > dpToPx(6)) moved[0] = true;
+                    if (moved[0]) {
+                        float maxX = 0f, minX = -(parent.getWidth() - v.getWidth() - dpToPx(4));
+                        float minY = -v.getTop() + dpToPx(8);
+                        float maxY = parent.getHeight() - v.getTop() - v.getHeight() - dpToPx(8);
+                        v.setTranslationX(Math.max(minX, Math.min(maxX, down[2] + dx)));
+                        v.setTranslationY(Math.max(minY, Math.min(maxY, down[3] + dy)));
+                    }
+                    return true;
+                }
+                case android.view.MotionEvent.ACTION_UP:
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    v.setAlpha(0.55f);
+                    if (!moved[0]) {
+                        v.performClick();
+                    } else {
+                        float minX = -(parent.getWidth() - v.getWidth() - dpToPx(4));
+                        boolean left = v.getTranslationX() < minX / 2f;
+                        v.animate().translationX(left ? minX : 0f).setDuration(160).start();
+                    }
+                    return true;
+            }
+            return false;
         });
     }
 
@@ -2701,37 +2815,17 @@ public class MainActivity extends AppCompatActivity {
             tabContainer.setContentDescription(label);
             applyRippleForeground(tabContainer);
 
-            TextView iconView = new TextView(this);
-            iconView.setGravity(Gravity.CENTER);
-            boolean hasRealIcon = !icon.isEmpty() && !icon.equals("\u25CF");
-            GradientDrawable badgeGlow = null;
-
-            if (hasRealIcon) {
-                iconView.setText(icon);
-                iconView.setTextSize(20);
-                iconView.setLayoutParams(new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-            } else {
-                String letter = label.isEmpty() ? "?" : label.substring(0, 1).toUpperCase();
-                iconView.setText(letter);
-                iconView.setTextSize(13);
-                iconView.setTypeface(Typeface.DEFAULT_BOLD);
-                LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(dpToPx(22), dpToPx(22));
-                iconView.setLayoutParams(badgeParams);
-
-                badgeGlow = new GradientDrawable();
-                badgeGlow.setShape(GradientDrawable.OVAL);
-                badgeGlow.setColor(ContextCompat.getColor(this, R.color.accent_color));
-                badgeGlow.setAlpha(50);
-                iconView.setBackground(badgeGlow);
-            }
-            tabBadgeGlow.add(badgeGlow);
+            ImageView iconView = new ImageView(this);
+            iconView.setImageResource(tabIconFor(label, icon));
+            iconView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            iconView.setLayoutParams(new LinearLayout.LayoutParams(dpToPx(20), dpToPx(20)));
+            tabBadgeGlow.add(null);
 
             TextView labelView = new TextView(this);
             labelView.setText(label);
             labelView.setGravity(Gravity.CENTER);
-            labelView.setTextSize(10.5f);
-            labelView.setPadding(0, dpToPx(3), 0, 0);
+            labelView.setTextSize(9.5f);
+            labelView.setPadding(0, dpToPx(0), 0, 0);
             labelView.setMaxLines(1);
 
             tabContainer.addView(iconView);
@@ -2792,13 +2886,15 @@ public class MainActivity extends AppCompatActivity {
                 View child = container.getChildAt(j);
                 if (child instanceof TextView) {
                     ((TextView) child).setTextColor(color);
+                } else if (child instanceof ImageView) {
+                    ((ImageView) child).setColorFilter(color);
                 }
             }
 
             if (i < tabBadgeGlow.size() && tabBadgeGlow.get(i) != null) {
                 GradientDrawable glow = tabBadgeGlow.get(i);
                 if (active) {
-                    glow.setStroke(dpToPx(2), activeColor);
+                    glow.setStroke(dpToPx(1), activeColor);
                 } else {
                     glow.setStroke(0, Color.TRANSPARENT);
                 }
