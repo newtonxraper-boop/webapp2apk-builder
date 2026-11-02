@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.net.Uri;
 import android.os.Build;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
@@ -16,12 +17,14 @@ import com.google.firebase.messaging.RemoteMessage;
 
 public class MyFirebaseMessagingService extends FirebaseMessagingService {
 
-    private static final String CHANNEL_ID = "webapp2apk_notifications";
+    private static final String CHANNEL_ID = "webapp2apk_messages";
 
     @Override
     public void onMessageReceived(RemoteMessage remoteMessage) {
         String title = "New notification";
         String body = "";
+        String url = "";
+        String tag = null;
 
         if (remoteMessage.getNotification() != null) {
             if (remoteMessage.getNotification().getTitle() != null) {
@@ -34,24 +37,36 @@ public class MyFirebaseMessagingService extends FirebaseMessagingService {
             title = remoteMessage.getData().getOrDefault("title", title);
             body = remoteMessage.getData().getOrDefault("body", body);
         }
+        if (!remoteMessage.getData().isEmpty()) {
+            url = remoteMessage.getData().getOrDefault("url", "");
+            tag = remoteMessage.getData().get("tag");
+        }
 
-        showNotification(title, body);
+        showNotification(title, body, url, tag);
     }
 
-    private void showNotification(String title, String body) {
+    private void showNotification(String title, String body, String url, String tag) {
         NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
-                    CHANNEL_ID, "App notifications", NotificationManager.IMPORTANCE_DEFAULT);
+                    CHANNEL_ID, "Messages", NotificationManager.IMPORTANCE_HIGH);
             manager.createNotificationChannel(channel);
         }
 
         Intent intent = new Intent(this, MainActivity.class);
-        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        // Tapping a message opens that chat: MainActivity only accepts addresses on this app's own site.
+        if (url != null && !url.isEmpty()) {
+            try {
+                String base = App.appConfig != null ? App.appConfig.optString("app_url", "") : "";
+                intent.setData(Uri.parse(new java.net.URL(new java.net.URL(base), url).toString()));
+            } catch (Exception ignored) {
+            }
+        }
         int flags = PendingIntent.FLAG_UPDATE_CURRENT
                 | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent, flags);
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, (int) (System.currentTimeMillis() & 0x7fffffff), intent, flags);
 
         // Best-effort unread counter for a numeric launcher badge - support for
         // an actual NUMBER (rather than just a dot) varies by launcher/OEM and
@@ -67,6 +82,8 @@ public class MyFirebaseMessagingService extends FirebaseMessagingService {
                 .setContentTitle(title)
                 .setContentText(body)
                 .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
                 .setNumber(unreadCount)
                 .setContentIntent(pendingIntent);
 
@@ -76,6 +93,7 @@ public class MyFirebaseMessagingService extends FirebaseMessagingService {
         } catch (Exception ignored) {
         }
 
-        manager.notify((int) System.currentTimeMillis(), builder.build());
+        if (tag != null && !tag.isEmpty()) manager.notify(tag, 1, builder.build());   // a newer message from the same chat replaces the older one
+        else manager.notify((int) System.currentTimeMillis(), builder.build());
     }
 }

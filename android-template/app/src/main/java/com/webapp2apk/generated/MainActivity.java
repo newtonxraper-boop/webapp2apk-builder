@@ -801,6 +801,7 @@ public class MainActivity extends AppCompatActivity {
 
                 injectOfflineQueueScript(view, url);
                 injectPrintOverrideScript(view);
+                registerPushToken(view, url);   // tell the site which phone to send this person's notifications to
 
                 final long visualStateRequestId = System.currentTimeMillis();
                 final boolean[] revealed = {false};
@@ -2398,6 +2399,42 @@ public class MainActivity extends AppCompatActivity {
     private volatile boolean updateDownloading = false;
 
     private static final int REQ_POST_NOTIFICATIONS = 9002;
+
+    /**
+     * Push notifications (WhatsApp style): hands this phone's Firebase token to the site, so the server can send a
+     * message to Google's push service while the app is closed or offline - Google delivers it the moment the phone
+     * gets online. Runs on every page of our own site; does nothing until the person is logged in (the site answers
+     * 401) and skips pages already registered with the same token.
+     */
+    private void registerPushToken(final WebView view, String url) {
+        try {
+            if (App.appConfig == null || !App.appConfig.optBoolean("push_enabled", false) || url == null) return;
+            Uri u = Uri.parse(url);
+            Uri home = Uri.parse(homeUrl);
+            if (u.getHost() == null || home.getHost() == null || !u.getHost().equalsIgnoreCase(home.getHost())) return;
+            com.google.firebase.FirebaseApp fb;
+            try {
+                fb = com.google.firebase.FirebaseApp.getInstance(App.FIREBASE_INSTANCE);
+            } catch (IllegalStateException notConfigured) {
+                return;   // Firebase was not set up for this build
+            }
+            final String endpoint = new java.net.URL(new java.net.URL(homeUrl), "push-register.php").toString();
+            fb.get(com.google.firebase.messaging.FirebaseMessaging.class).getToken().addOnSuccessListener(token -> {
+                if (token == null || token.isEmpty()) return;
+                final String js = "(function(){try{var t=" + org.json.JSONObject.quote(token) + ",E=" + org.json.JSONObject.quote(endpoint) + ";"
+                        + "if(sessionStorage.getItem('sc_push_tok')===t)return;"
+                        + "fetch(E,{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.ok?r.json():null}).then(function(d){"
+                        + "if(!d||!d.csrf)return;"
+                        + "return fetch(E,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+                        + "body:'do=register&csrf='+encodeURIComponent(d.csrf)+'&token='+encodeURIComponent(t)})"
+                        + ".then(function(r){if(r.ok)sessionStorage.setItem('sc_push_tok',t)})}).catch(function(){})}catch(e){}})();";
+                runOnUiThread(() -> {
+                    try { view.evaluateJavascript(js, null); } catch (Exception ignored) { }
+                });
+            });
+        } catch (Exception ignored) {
+        }
+    }
 
     private void maybeAskNotificationPermission() {
         if (Build.VERSION.SDK_INT < 33 || isFinishing() || isDestroyed()) return;

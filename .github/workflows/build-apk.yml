@@ -99,6 +99,10 @@ jobs:
           ACCENT_COLOR: ${{ inputs.accent_color }}
           SPLASH_ENABLED: ${{ inputs.splash_enabled }}
           PUSH_ENABLED: ${{ inputs.push_enabled }}
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_SENDER_ID: ${{ secrets.FIREBASE_SENDER_ID }}
           FILECAMERA_ENABLED: ${{ inputs.filecamera_enabled }}
           KIOSK_ENABLED: ${{ inputs.kiosk_enabled }}
           NAV_ITEMS_B64: ${{ inputs.nav_items_b64 }}
