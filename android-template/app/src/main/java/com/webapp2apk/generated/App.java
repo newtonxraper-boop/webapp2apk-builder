@@ -56,6 +56,9 @@ public class App extends Application {
         // appConfig itself is still loaded synchronously above since
         // Splash/MainActivity depend on it being ready immediately.
         new android.os.Handler(android.os.Looper.getMainLooper()).post(this::maybeInitFirebase);
+        // Detect when the phone gets data and fetch notifications from the site.
+        DataWatcher.start(this);
+        NotifySyncWorker.scheduleIfNeeded(this);
     }
 
     private final class ActivityLifecycleTracker implements ActivityLifecycleCallbacks {

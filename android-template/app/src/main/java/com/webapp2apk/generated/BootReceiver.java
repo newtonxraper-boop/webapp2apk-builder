@@ -21,6 +21,9 @@ public class BootReceiver extends BroadcastReceiver {
             KeepAliveService.start(context);
             UpdateWorker.scheduleIfNeeded(context);
             PeriodicRefreshWorker.scheduleIfNeeded(context);
+            NotifySyncWorker.scheduleIfNeeded(context);
+            DataWatcher.start(context);
+            NotifySyncWorker.runNow(context);
         } catch (Exception ignored) {
         }
     }
